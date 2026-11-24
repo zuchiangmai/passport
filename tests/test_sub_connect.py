@@ -1,4 +1,7 @@
+import random
+import threading
 import uuid
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -209,7 +212,7 @@ def test_new_passcode_invalidates_the_previous_code(client, mail, db):
 
 
 def test_concurrent_wrong_codes_cannot_pass_the_lock(tmp_path, monkeypatch):
-    """File sqlite, one connection per thread. The shared StaticPool connection crashes and flakes."""
+    """File sqlite, one connection per thread. The real code sits in the burst, not after it."""
     engine = create_engine(
         f"sqlite:///{tmp_path / 'lock.sqlite'}",
         connect_args={"check_same_thread": False, "timeout": 30},
@@ -226,48 +229,95 @@ def test_concurrent_wrong_codes_cannot_pass_the_lock(tmp_path, monkeypatch):
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     sent = {}
+    compared = []
+    reserved = []
+    compared_lock = threading.Lock()
+    original_load = auth_service._load_passcode
+    original_reserve = auth_service._reserve_passcode_attempt
 
     def capture(_to, _subject, body):
         sent["code"] = body.split("code=", 1)[1].split()[0]
 
+    def counting_load(db, email, code):
+        # Read in the verify thread. A compare that skipped the reserve still sees the default 0.
+        ticket = auth_service._passcode_ticket.get()
+        with compared_lock:
+            compared.append((ticket, code))
+        return original_load(db, email, code)
+
+    def counting_reserve(db, user_id):
+        ticket = original_reserve(db, user_id)
+        with compared_lock:
+            reserved.append(ticket)
+        return ticket
+
     monkeypatch.setattr(auth_service, "send_email", capture)
-    email = unique_email()
-    setup = Session()
-    try:
-        setup.add(User(id=uuid.uuid4().hex, email=email, verified=True))
-        setup.commit()
-        auth_service.request_passcode(setup, email)
-    finally:
-        setup.close()
-    code = sent["code"]
+    monkeypatch.setattr(auth_service, "_load_passcode", counting_load)
+    monkeypatch.setattr(auth_service, "_reserve_passcode_attempt", counting_reserve)
 
-    def guess(_n):
-        one = Session()
+    def reservations_are_one_lock(tickets: list[int]) -> bool:
+        """One write lock: 1..N once, then at most one fresh window 1..M after the success reset."""
+        if not tickets or any(t < 1 for t in tickets):
+            return False
+        counts = Counter(tickets)
+        if any(n > 2 for n in counts.values()):
+            return False
+        hi = max(counts)
+        if any(t not in counts for t in range(1, hi + 1)):
+            return False
+        doubled = {t for t, n in counts.items() if n == 2}
+        if not doubled:
+            return all(counts[t] == 1 for t in range(1, hi + 1))
+        end = max(doubled)
+        return doubled == set(range(1, end + 1))
+
+    def burst(put_real_code_first: bool):
+        compared.clear()
+        reserved.clear()
+        email = unique_email()
+        setup = Session()
         try:
-            try:
-                auth_service.verify_passcode(one, email, "000000")
-            except RateLimited:
-                return 429
-            except Unauthorized:
-                return 401
-            return 200
+            setup.add(User(id=uuid.uuid4().hex, email=email, verified=True))
+            setup.commit()
+            auth_service.request_passcode(setup, email)
         finally:
-            one.close()
+            setup.close()
+        real = sent["code"]
+        guesses = ["000000"] * 40
+        slot = 0 if put_real_code_first else random.randrange(len(guesses) + 1)
+        guesses.insert(slot, real)
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        statuses = list(pool.map(guess, range(40)))
-    assert statuses.count(401) <= 5, statuses
-    assert 429 in statuses
-    assert set(statuses) <= {401, 429}, statuses
-    last = Session()
+        def guess(attempt: str):
+            one = Session()
+            try:
+                try:
+                    auth_service.verify_passcode(one, email, attempt)
+                except RateLimited:
+                    return 429
+                except Unauthorized:
+                    return 401
+                return 200
+            finally:
+                one.close()
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            statuses = list(pool.map(guess, guesses))
+        tickets = [ticket for ticket, _code in compared]
+        real_hits = [ticket for ticket, code in compared if code == real]
+        assert tickets and all(1 <= ticket <= 5 for ticket in tickets), (tickets, statuses)
+        assert Counter(tickets) == Counter(ticket for ticket in reserved if ticket <= 5), (tickets, reserved)
+        assert reservations_are_one_lock(reserved), (reserved, statuses)
+        assert len(real_hits) <= 1, (real_hits, statuses)
+        assert statuses.count(200) <= 1
+        if statuses.count(200) == 1:
+            assert len(real_hits) == 1 and real_hits[0] <= 5, (real_hits, statuses)
+        assert set(statuses) <= {200, 401, 429}, statuses
+
     try:
-        try:
-            auth_service.verify_passcode(last, email, code)
-        except RateLimited:
-            return
-        raise AssertionError("correct code was accepted after the lock")
+        burst(True)
+        for _ in range(7):
+            burst(False)
     finally:
-        last.close()
         engine.dispose()
 
 

@@ -1,4 +1,5 @@
-from datetime import timedelta
+import contextvars
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -116,69 +117,139 @@ def request_passcode(db: Session, email: str) -> None:
 # Five wrong or expired codes in this window lock the address. Knowing the address is enough to trigger it.
 PASSCODE_MAX_FAILURES = 5
 PASSCODE_LOCK_MINUTES = 15
+# Set to the reserved ticket before the code is read. 0 means this attempt has not reserved one.
+_passcode_ticket: contextvars.ContextVar[int] = contextvars.ContextVar("passcode_ticket", default=0)
+# expires_at on the meter row is METER_EPOCH plus the attempt number, in whole seconds.
+METER_EPOCH = utcnow().replace(year=2020, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
-def _record_passcode_failure(db: Session, user: User) -> None:
-    db.add(
-        Token(
-            id=new_id(),
-            user_id=user.id,
-            purpose="passcode_fail",
-            token_hash=hash_secret(new_opaque_token()),
-            expires_at=utcnow() + timedelta(minutes=PASSCODE_LOCK_MINUTES),
-        )
-    )
-    db.commit()
+def _as_utc(value) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo is not None else value
+    return datetime.fromisoformat(str(value).replace("Z", ""))
 
 
-def _passcode_failures(db: Session, user: User) -> int:
-    since = utcnow() - timedelta(minutes=PASSCODE_LOCK_MINUTES)
+def _meter_ticket(expires_at) -> int:
+    return int((_as_utc(expires_at) - METER_EPOCH).total_seconds())
+
+
+def _load_passcode(db: Session, email: str, code: str) -> Token | None:
     return (
         db.query(Token)
-        .filter(
-            Token.user_id == user.id,
-            Token.purpose == "passcode_fail",
-            Token.created_at >= since,
-        )
-        .count()
+        .filter(Token.token_hash == hash_secret(f"{code}:{email}"), Token.purpose == "passcode")
+        .one_or_none()
     )
 
 
-def _reject_passcode(db: Session, user: User, *, expired: bool) -> None:
-    """Commit the failure before deciding, so concurrent guesses cannot all pass the old count."""
-    _record_passcode_failure(db, user)
-    if _passcode_failures(db, user) > PASSCODE_MAX_FAILURES:
-        raise RateLimited("too many attempts")
-    if expired:
+def _sqlite_immediate(db: Session, work):
+    """Read and write the attempt meter with SQLite's reserved lock held the whole time."""
+    db.commit()
+    raw_conn = db.get_bind().raw_connection()
+    try:
+        dbapi = raw_conn.driver_connection
+        previous = dbapi.isolation_level
+        dbapi.isolation_level = None
+        try:
+            dbapi.execute("BEGIN IMMEDIATE")
+            cursor = dbapi.cursor()
+            try:
+                result = work(cursor)
+                dbapi.commit()
+                return result
+            except Exception:
+                dbapi.rollback()
+                raise
+            finally:
+                cursor.close()
+        finally:
+            dbapi.isolation_level = previous
+    finally:
+        raw_conn.close()
+
+
+def _reserve_passcode_attempt(db: Session, user_id: str) -> int:
+    """Take the next attempt number under a write lock, before the code is read."""
+
+    def work(cursor) -> int:
+        now = utcnow()
+        cursor.execute(
+            "SELECT expires_at, created_at FROM tokens WHERE user_id = ? AND purpose = 'passcode_meter'",
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        window_open = row is not None and _as_utc(row[1]) >= now - timedelta(minutes=PASSCODE_LOCK_MINUTES)
+        if window_open:
+            ticket = _meter_ticket(row[0]) + 1
+            cursor.execute(
+                "UPDATE tokens SET expires_at = ? WHERE user_id = ? AND purpose = 'passcode_meter'",
+                (METER_EPOCH + timedelta(seconds=ticket), user_id),
+            )
+            return ticket
+        ticket = 1
+        exp = METER_EPOCH + timedelta(seconds=ticket)
+        if row is None:
+            cursor.execute(
+                """INSERT INTO tokens (id, user_id, purpose, token_hash, expires_at, created_at)
+                   VALUES (?, ?, 'passcode_meter', ?, ?, ?)""",
+                (new_id(), user_id, hash_secret(f"passcode-meter:{user_id}"), exp, now),
+            )
+        else:
+            cursor.execute(
+                """UPDATE tokens SET expires_at = ?, created_at = ?
+                   WHERE user_id = ? AND purpose = 'passcode_meter'""",
+                (exp, now, user_id),
+            )
+        return ticket
+
+    return _sqlite_immediate(db, work)
+
+
+def _accept_passcode(db: Session, user_id: str, email: str, code: str, ticket: int) -> User:
+    token = _load_passcode(db, email, code)
+    if not token or token.consumed_at is not None:
+        raise Unauthorized("invalid code")
+    if token.expires_at < utcnow():
         raise Gone("code expired")
-    raise Unauthorized("invalid code")
+    token_id = token.id
+
+    def work(cursor) -> None:
+        now = utcnow()
+        cursor.execute("UPDATE tokens SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL", (now, token_id))
+        if cursor.rowcount != 1:
+            raise Unauthorized("invalid code")
+        cursor.execute(
+            "SELECT expires_at FROM tokens WHERE user_id = ? AND purpose = 'passcode_meter'",
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        # A later attempt already took a higher number. Leave that lock in place.
+        if row is not None and _meter_ticket(row[0]) == ticket:
+            cursor.execute(
+                """UPDATE tokens SET expires_at = ?, created_at = ?
+                   WHERE user_id = ? AND purpose = 'passcode_meter'""",
+                (METER_EPOCH, now, user_id),
+            )
+
+    _sqlite_immediate(db, work)
+    audit_mod.audit(db, "system", None, "auth.passcode", {"user_id": user_id})
+    db.commit()
+    fresh = db.get(User, user_id)
+    if fresh is None:
+        raise Unauthorized("invalid code")
+    return fresh
 
 
 def verify_passcode(db: Session, email: str, code: str) -> User:
     email = email.lower()
     code = code.strip()
     user = get_user_by_email(db, email)
-    if user and user.verified and _passcode_failures(db, user) >= PASSCODE_MAX_FAILURES:
-        raise RateLimited("too many attempts")
-    token = (
-        db.query(Token)
-        .filter(Token.token_hash == hash_secret(f"{code}:{email}"), Token.purpose == "passcode")
-        .one_or_none()
-    )
-    if not token or token.consumed_at is not None or not user or user.email != email or not user.verified:
-        if user and user.verified:
-            _reject_passcode(db, user, expired=False)
+    if not user or not user.verified or user.email != email:
         raise Unauthorized("invalid code")
-    if token.expires_at < utcnow():
-        _reject_passcode(db, user, expired=True)
-    if _passcode_failures(db, user) >= PASSCODE_MAX_FAILURES:
+    ticket = _reserve_passcode_attempt(db, user.id)
+    _passcode_ticket.set(ticket)
+    if ticket > PASSCODE_MAX_FAILURES:
         raise RateLimited("too many attempts")
-    token.consumed_at = utcnow()
-    db.query(Token).filter(Token.user_id == user.id, Token.purpose == "passcode_fail").delete()
-    audit_mod.audit(db, "system", None, "auth.passcode", {"user_id": user.id})
-    db.commit()
-    db.refresh(user)
-    return user
+    return _accept_passcode(db, user.id, email, code, ticket)
 
 
 def request_login(db: Session, email: str) -> None:
