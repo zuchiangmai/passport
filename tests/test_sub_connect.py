@@ -126,6 +126,73 @@ def test_coliving_can_authorize(client, mail):
     assert exchanged.json()["canteen_allowed"] is False
 
 
+def test_exchange_returns_snapshot_without_session_token(client, mail):
+    email = register_and_verify(client, mail)
+    token, sub = passcode_login(client, mail, email)
+    r = client.post(
+        "/v1/connect/authorize",
+        json={"client_id": "coliving", "redirect_uri": COLIVING, "state": "abc"},
+        headers={"Authorization": "Bearer " + token},
+    )
+    exchanged = client.post(
+        "/v1/connect/token",
+        json={
+            "client_id": "coliving",
+            "client_secret": "dev-coliving-secret",
+            "code": r.json()["code"],
+            "redirect_uri": COLIVING,
+        },
+    )
+    assert exchanged.status_code == 200, exchanged.text
+    body = exchanged.json()
+    assert body["sub"] == sub
+    assert "access_token" not in body
+    assert "token_type" not in body
+
+
+def test_passcode_locks_after_five_failures(client, mail):
+    email = register_and_verify(client, mail)
+    assert client.post("/v1/auth/passcode/request", json={"email": email}).status_code == 202
+    code = mail.last_code(email)
+    for _ in range(5):
+        wrong = client.post("/v1/auth/passcode/verify", json={"email": email, "code": "000000"})
+        assert wrong.status_code == 401
+    locked = client.post("/v1/auth/passcode/verify", json={"email": email, "code": code})
+    assert locked.status_code == 429
+    assert locked.json()["error"]["code"] == "rate_limited"
+
+
+def test_production_rejects_published_client_secrets():
+    from app.config import Settings, assert_client_secrets
+
+    published = Settings(
+        environment="production",
+        coliving_client_secret="dev-coliving-secret",
+        canteen_client_secret="a-real-canteen-secret",
+    )
+    try:
+        assert_client_secrets(published)
+    except RuntimeError as exc:
+        assert "coliving_client_secret" in str(exc)
+    else:
+        raise AssertionError("published secret was accepted")
+
+    empty = Settings(environment="production", coliving_client_secret="real-coliving", canteen_client_secret="")
+    try:
+        assert_client_secrets(empty)
+    except RuntimeError as exc:
+        assert "canteen_client_secret" in str(exc)
+    else:
+        raise AssertionError("empty secret was accepted")
+
+    ok = Settings(
+        environment="production",
+        coliving_client_secret="real-coliving",
+        canteen_client_secret="real-canteen",
+    )
+    assert_client_secrets(ok) is None
+
+
 def test_bad_redirect_rejected(client, mail):
     email = register_and_verify(client, mail)
     token, _sub = passcode_login(client, mail, email)

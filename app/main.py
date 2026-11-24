@@ -18,7 +18,7 @@ from .api import (
     users,
     webhooks,
 )
-from .config import get_settings
+from .config import assert_client_secrets, get_settings
 from .db import Base, engine
 from .errors import AppError, app_error_handler
 
@@ -65,5 +65,6 @@ def healthz():
 
 @app.on_event("startup")
 def create_tables() -> None:
+    assert_client_secrets()
     # Convenience for dev/test; production uses alembic upgrade head.
     Base.metadata.create_all(bind=engine)

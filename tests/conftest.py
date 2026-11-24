@@ -17,6 +17,8 @@ os.environ.setdefault("CHECKIN_SECRET", "test-checkin-secret")
 os.environ.setdefault("ADMIN_KEY", "test-admin-key")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-bot-token")
 os.environ.setdefault("EMAIL_BACKEND", "console")
+os.environ.setdefault("COLIVING_CLIENT_SECRET", "dev-coliving-secret")
+os.environ.setdefault("CANTEEN_CLIENT_SECRET", "dev-canteen-secret")
 
 from app.db import Base, get_db
 from app.main import app

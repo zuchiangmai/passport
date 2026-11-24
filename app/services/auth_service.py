@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from .. import audit as audit_mod
 from ..config import get_settings
 from ..email_backend import send_email
-from ..errors import Conflict, Gone, NotFound, Unauthorized
+from ..errors import Conflict, Gone, NotFound, RateLimited, Unauthorized
 from ..models import Token, User
 from ..security import hash_secret, new_id, new_opaque_token, utcnow
 from .webhook_service import emit
@@ -107,24 +107,56 @@ def request_passcode(db: Session, email: str) -> None:
     db.commit()
 
 
+PASSCODE_MAX_FAILURES = 5
+PASSCODE_LOCK_MINUTES = 15
+
+
+def _record_passcode_failure(db: Session, user: User) -> None:
+    db.add(
+        Token(
+            id=new_id(),
+            user_id=user.id,
+            purpose="passcode_fail",
+            token_hash=hash_secret(new_opaque_token()),
+            expires_at=utcnow() + timedelta(minutes=PASSCODE_LOCK_MINUTES),
+        )
+    )
+    db.commit()
+
+
+def _passcode_failures(db: Session, user: User) -> int:
+    since = utcnow() - timedelta(minutes=PASSCODE_LOCK_MINUTES)
+    return (
+        db.query(Token)
+        .filter(
+            Token.user_id == user.id,
+            Token.purpose == "passcode_fail",
+            Token.created_at >= since,
+        )
+        .count()
+    )
+
+
 def verify_passcode(db: Session, email: str, code: str) -> User:
     email = email.lower()
     code = code.strip()
+    user = get_user_by_email(db, email)
+    if user and user.verified and _passcode_failures(db, user) >= PASSCODE_MAX_FAILURES:
+        raise RateLimited("too many attempts")
     token = (
         db.query(Token)
         .filter(Token.token_hash == hash_secret(f"{code}:{email}"), Token.purpose == "passcode")
         .one_or_none()
     )
-    if not token:
+    if not token or token.consumed_at is not None or not user or user.email != email or not user.verified:
+        if user and user.verified:
+            _record_passcode_failure(db, user)
         raise Unauthorized("invalid code")
-    if token.consumed_at is not None:
-        raise Unauthorized("code already used")
     if token.expires_at < utcnow():
+        _record_passcode_failure(db, user)
         raise Gone("code expired")
     token.consumed_at = utcnow()
-    user = db.get(User, token.user_id)
-    if not user or user.email != email or not user.verified:
-        raise Unauthorized("invalid code")
+    db.query(Token).filter(Token.user_id == user.id, Token.purpose == "passcode_fail").delete()
     audit_mod.audit(db, "system", None, "auth.passcode", {"user_id": user.id})
     db.commit()
     db.refresh(user)

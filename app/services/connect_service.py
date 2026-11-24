@@ -68,7 +68,8 @@ def authorize(db: Session, user: User, client_id: str, redirect_uri: str, state:
 def exchange(db: Session, client_id: str, client_secret: str, code: str, redirect_uri: str) -> dict:
     client = _client(client_id)
     expected = getattr(settings, client["secret_attr"])
-    if not client_secret or not hmac.compare_digest(client_secret, expected):
+    # Empty means the secret was not configured. Never fall back to a value that is in the source tree.
+    if not expected or not client_secret or not hmac.compare_digest(client_secret, expected):
         raise Unauthorized("invalid client")
     check_redirect(client_id, redirect_uri)
     row = db.query(AuthCode).filter(AuthCode.code_hash == hash_secret(code)).one_or_none()
@@ -86,10 +87,5 @@ def exchange(db: Session, client_id: str, client_secret: str, code: str, redirec
         raise CanteenRequiresColiving("canteen requires a CoLiving registration")
     audit_mod.audit(db, "user", user.id, "connect.exchange", {"client_id": client_id})
     db.commit()
-    body = snapshot(db, user)
-    from ..security import create_access_token
-
-    body["access_token"] = create_access_token(user.id)
-    body["token_type"] = "Bearer"
-    body["expires_in"] = settings.access_token_ttl_minutes * 60
-    return body
+    # Snapshot only. A full user session token here could be replayed against /v1/me.
+    return snapshot(db, user)

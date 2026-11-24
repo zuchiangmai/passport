@@ -31,6 +31,11 @@ class Unauthorized(AppError):
     status = 401
 
 
+class RateLimited(AppError):
+    code = "rate_limited"
+    status = 429
+
+
 class Forbidden(AppError):
     code = "forbidden"
     status = 403

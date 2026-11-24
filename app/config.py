@@ -26,8 +26,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
 
     public_base_url: str = "https://4seas.xyz"
-    coliving_client_secret: str = "dev-coliving-secret"
-    canteen_client_secret: str = "dev-canteen-secret"
+    # development | production. Production refuses an empty secret and the values that used to be in source.
+    environment: str = "development"
+    coliving_client_secret: str = ""
+    canteen_client_secret: str = ""
     passcode_ttl_minutes: int = 10
     auth_code_ttl_minutes: int = 5
 
@@ -38,6 +40,21 @@ class Settings(BaseSettings):
 
     webhook_timeout_seconds: int = 5
     webhook_max_attempts: int = 3
+
+
+# These strings shipped in the repo. A production process must not accept them.
+PUBLISHED_CLIENT_SECRETS = frozenset({"dev-coliving-secret", "dev-canteen-secret"})
+
+
+def assert_client_secrets(settings: Settings | None = None) -> None:
+    """Fail closed in production when a connect client secret was left unset or published."""
+    settings = settings or get_settings()
+    if settings.environment != "production":
+        return
+    for name in ("coliving_client_secret", "canteen_client_secret"):
+        value = getattr(settings, name)
+        if not value or value in PUBLISHED_CLIENT_SECRETS or value.startswith("change-me"):
+            raise RuntimeError(f"{name} must be a private value when environment=production")
 
 
 @lru_cache
