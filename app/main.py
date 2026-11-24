@@ -5,7 +5,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .api import auth, checkin, me, points, service_keys, users, webhooks
+from .api import (
+    auth,
+    checkin,
+    connect,
+    identity,
+    login_page,
+    me,
+    oauth,
+    points,
+    service_keys,
+    users,
+    webhooks,
+)
 from .config import get_settings
 from .db import Base, engine
 from .errors import AppError, app_error_handler
@@ -28,11 +40,25 @@ async def http_handler(_, exc: StarletteHTTPException):
     return JSONResponse(status_code=exc.status_code, content={"error": {"code": "http_error", "message": str(exc.detail)}})
 
 
-for r in (auth.router, me.router, service_keys.router, users.router, points.router, checkin.router, webhooks.router):
+for r in (
+    auth.router,
+    oauth.router,
+    connect.router,
+    identity.router,
+    login_page.router,
+    me.router,
+    service_keys.router,
+    users.router,
+    points.router,
+    checkin.router,
+    webhooks.router,
+):
     app.include_router(r)
+    app.include_router(r, prefix="/passport")
 
 
 @app.get("/healthz")
+@app.get("/passport/healthz")
 def healthz():
     return {"status": "ok", "service": "cas"}
 

@@ -7,6 +7,7 @@ from ..models import User
 from ..schemas import (
     LoginRequestIn,
     LoginVerifyIn,
+    PasscodeVerifyIn,
     RegisterIn,
     UserOut,
     VerifyEmailIn,
@@ -27,6 +28,18 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
 def verify_email(body: VerifyEmailIn, db: Session = Depends(get_db)):
     user = auth_service.verify_email(db, body.token)
     return {"user_id": user.id, "verified": True}
+
+
+@router.post("/passcode/request", status_code=202)
+def passcode_request(body: LoginRequestIn, db: Session = Depends(get_db)):
+    auth_service.request_passcode(db, body.email)
+    return {"status": "sent"}
+
+
+@router.post("/passcode/verify")
+def passcode_verify(body: PasscodeVerifyIn, db: Session = Depends(get_db)):
+    user = auth_service.verify_passcode(db, body.email, body.code)
+    return {"access_token": create_access_token(user.id), "user": UserOut.model_validate(user)}
 
 
 @router.post("/login/request", status_code=202)

@@ -81,6 +81,56 @@ def verify_email(db: Session, token: str) -> User:
     return user
 
 
+def request_passcode(db: Session, email: str) -> None:
+    """Email a 6-digit code. Unknown or unverified addresses get the same response."""
+    email = email.lower()
+    user = get_user_by_email(db, email)
+    if user and user.verified:
+        recent = (
+            db.query(Token)
+            .filter(Token.user_id == user.id, Token.purpose == "passcode", Token.consumed_at.is_(None))
+            .order_by(Token.created_at.desc())
+            .first()
+        )
+        if not recent or recent.created_at < utcnow() - timedelta(seconds=30):
+            code = f"{__import__('secrets').randbelow(1000000):06d}"
+            db.add(
+                Token(
+                    id=new_id(),
+                    user_id=user.id,
+                    purpose="passcode",
+                    token_hash=hash_secret(f"{code}:{email}"),
+                    expires_at=utcnow() + timedelta(minutes=settings.passcode_ttl_minutes),
+                )
+            )
+            send_email(email, "Your 4Seas login code", "code=" + code)
+    db.commit()
+
+
+def verify_passcode(db: Session, email: str, code: str) -> User:
+    email = email.lower()
+    code = code.strip()
+    token = (
+        db.query(Token)
+        .filter(Token.token_hash == hash_secret(f"{code}:{email}"), Token.purpose == "passcode")
+        .one_or_none()
+    )
+    if not token:
+        raise Unauthorized("invalid code")
+    if token.consumed_at is not None:
+        raise Unauthorized("code already used")
+    if token.expires_at < utcnow():
+        raise Gone("code expired")
+    token.consumed_at = utcnow()
+    user = db.get(User, token.user_id)
+    if not user or user.email != email or not user.verified:
+        raise Unauthorized("invalid code")
+    audit_mod.audit(db, "system", None, "auth.passcode", {"user_id": user.id})
+    db.commit()
+    db.refresh(user)
+    return user
+
+
 def request_login(db: Session, email: str) -> None:
     """Always succeeds from the caller's perspective (no account enumeration)."""
     email = email.lower()

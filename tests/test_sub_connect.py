@@ -1,0 +1,175 @@
+import uuid
+
+from tests.test_auth import register_and_verify
+from tests.test_service_keys import create_service_key
+
+COLIVING = "https://4seas.xyz/coliving/auth/callback"
+CANTEEN = "https://4seas.xyz/canteen/auth/callback"
+
+
+def unique_email():
+    return "sub-" + uuid.uuid4().hex[:8] + "@example.com"
+
+
+def passcode_login(client, mail, email):
+    assert client.post("/v1/auth/passcode/request", json={"email": email}).status_code == 202
+    code = mail.last_code(email)
+    r = client.post("/v1/auth/passcode/verify", json={"email": email, "code": code})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["user"]["sub"] == body["user"]["user_id"]
+    return body["access_token"], body["user"]["sub"]
+
+
+def test_passcode_under_passport_prefix(client, mail):
+    email = register_and_verify(client, mail)
+    assert client.post("/passport/v1/auth/passcode/request", json={"email": email}).status_code == 202
+    code = mail.last_code(email)
+    r = client.post("/passport/v1/auth/passcode/verify", json={"email": email, "code": code})
+    assert r.status_code == 200
+    assert r.json()["user"]["sub"]
+
+
+def test_passcode_is_single_use(client, mail):
+    email = register_and_verify(client, mail)
+    client.post("/v1/auth/passcode/request", json={"email": email})
+    code = mail.last_code(email)
+    assert client.post("/v1/auth/passcode/verify", json={"email": email, "code": code}).status_code == 200
+    again = client.post("/v1/auth/passcode/verify", json={"email": email, "code": code})
+    assert again.status_code == 401
+
+
+def test_canteen_blocked_until_coliving_links(client, mail):
+    email = register_and_verify(client, mail)
+    token, sub = passcode_login(client, mail, email)
+    r = client.post(
+        "/v1/connect/authorize",
+        json={"client_id": "canteen", "redirect_uri": CANTEEN, "state": "s1"},
+        headers={"Authorization": "Bearer " + token},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "canteen_requires_coliving"
+
+    secret = create_service_key(client, ["identity:write", "identity:read"])
+    linked = client.post(
+        "/v1/identity/links",
+        json={"app": "coliving", "email": email, "external_id": "cid-" + sub[:8], "display_name": "Resident"},
+        headers={"X-Service-Key": secret},
+    )
+    assert linked.status_code == 200, linked.text
+    assert linked.json()["sub"] == sub
+    assert linked.json()["canteen_allowed"] is True
+
+    r = client.post(
+        "/v1/connect/authorize",
+        json={"client_id": "canteen", "redirect_uri": CANTEEN, "state": "s2"},
+        headers={"Authorization": "Bearer " + token},
+    )
+    assert r.status_code == 200, r.text
+    code = r.json()["code"]
+    exchanged = client.post(
+        "/v1/connect/token",
+        json={
+            "client_id": "canteen",
+            "client_secret": "dev-canteen-secret",
+            "code": code,
+            "redirect_uri": CANTEEN,
+        },
+    )
+    assert exchanged.status_code == 200, exchanged.text
+    assert exchanged.json()["sub"] == sub
+    assert exchanged.json()["canteen_allowed"] is True
+    assert client.post(
+        "/v1/connect/token",
+        json={
+            "client_id": "canteen",
+            "client_secret": "dev-canteen-secret",
+            "code": code,
+            "redirect_uri": CANTEEN,
+        },
+    ).status_code == 401
+
+
+def test_canteen_link_without_coliving_rejected(client, mail):
+    email = unique_email()
+    secret = create_service_key(client, ["identity:write"])
+    r = client.post(
+        "/v1/identity/links",
+        json={"app": "canteen", "email": email, "external_id": "user-1"},
+        headers={"X-Service-Key": secret},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "canteen_requires_coliving"
+
+
+def test_coliving_can_authorize(client, mail):
+    email = register_and_verify(client, mail)
+    token, sub = passcode_login(client, mail, email)
+    r = client.post(
+        "/v1/connect/authorize",
+        json={"client_id": "coliving", "redirect_uri": COLIVING, "state": "abc"},
+        headers={"Authorization": "Bearer " + token},
+    )
+    assert r.status_code == 200
+    assert r.json()["redirect_to"].startswith(COLIVING + "?code=")
+    exchanged = client.post(
+        "/passport/v1/connect/token",
+        json={
+            "client_id": "coliving",
+            "client_secret": "dev-coliving-secret",
+            "code": r.json()["code"],
+            "redirect_uri": COLIVING,
+        },
+    )
+    assert exchanged.status_code == 200
+    assert exchanged.json()["sub"] == sub
+    assert exchanged.json()["canteen_allowed"] is False
+
+
+def test_bad_redirect_rejected(client, mail):
+    email = register_and_verify(client, mail)
+    token, _sub = passcode_login(client, mail, email)
+    r = client.post(
+        "/v1/connect/authorize",
+        json={"client_id": "coliving", "redirect_uri": "https://evil.example/cb", "state": "x"},
+        headers={"Authorization": "Bearer " + token},
+    )
+    assert r.status_code == 403
+
+
+def test_login_page_on_passport_path(client):
+    r = client.get("/passport/login")
+    assert r.status_code == 200
+    assert "4Seas Passport" in r.text
+    assert client.get("/passport/healthz").json()["status"] == "ok"
+
+
+def test_google_callback_reuses_sub(client, mail, monkeypatch):
+    email = register_and_verify(client, mail)
+    _token, _sub = passcode_login(client, mail, email)
+    secret = create_service_key(client, ["identity:write"])
+    assert client.post(
+        "/v1/identity/links",
+        json={"app": "coliving", "email": email, "external_id": "cid-google"},
+        headers={"X-Service-Key": secret},
+    ).status_code == 200
+
+    from app.services import oauth_providers
+
+    monkeypatch.setattr(oauth_providers, "provider_configured", lambda _p: True)
+    monkeypatch.setattr(oauth_providers, "exchange_google", lambda _code: {"email": email, "display_name": "Alice"})
+    start = client.get(
+        "/passport/v1/auth/google/start",
+        params={"client_id": "canteen", "redirect_uri": CANTEEN, "state": "from-canteen"},
+        follow_redirects=False,
+    )
+    assert start.status_code == 302
+    state = start.headers["location"].split("state=")[1]
+    back = client.get(
+        "/passport/v1/auth/google/callback",
+        params={"code": "google-code", "state": state},
+        follow_redirects=False,
+    )
+    assert back.status_code == 302
+    assert back.headers["location"].startswith(CANTEEN + "?code=")
+    assert "state=from-canteen" in back.headers["location"]

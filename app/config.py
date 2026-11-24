@@ -25,6 +25,17 @@ class Settings(BaseSettings):
 
     telegram_bot_token: str = ""
 
+    public_base_url: str = "https://4seas.xyz"
+    coliving_client_secret: str = "dev-coliving-secret"
+    canteen_client_secret: str = "dev-canteen-secret"
+    passcode_ttl_minutes: int = 10
+    auth_code_ttl_minutes: int = 5
+
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    github_client_id: str = ""
+    github_client_secret: str = ""
+
     webhook_timeout_seconds: int = 5
     webhook_max_attempts: int = 3
 

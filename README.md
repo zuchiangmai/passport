@@ -2,7 +2,19 @@
 
 Community Account System, open source.
 
-4Seas 生态的统一账户与资产层:邮箱注册与验证、Telegram 绑定、服务密钥、积分账本(append-only)、活动签到令牌(一次性领取网址 + HMAC 签名)、NFT 领取登记(V2 占位)。业务系统(CommunityOS、booking、coliving 等)只通过接口消费 CAS,不自建账户。
+4Seas 生态的统一账户与资产层。对外地址是 `https://4seas.xyz/passport`（不是单独子域）。业务系统只认 Passport 的 `sub`，不各自发一套账号主键。
+
+`sub` 是这个人在 Passport 里的固定编号，等于 `users.id`。换邮箱、换 Google、换 GitHub 都不变。CoLiving 和食堂各自的库只存这一列，用来认出同一个人。通行密钥不是登录条件，可以以后再加。
+
+食堂只放行已经挂上 CoLiving 注册的 `sub`。没有 CoLiving 链接时，授权接口返回 `403 canteen_requires_coliving`。
+
+| 谁 | 做什么 |
+| --- | --- |
+| 浏览器 | 打开 `/passport/login?client_id&redirect_uri&state`，邮箱验证码、Google 或 GitHub |
+| CoLiving | 服务密钥 `identity:write` 把已验证邮箱和自己的外部 id 绑到 `sub`；用 `client_id=coliving` 换 token |
+| 食堂 | 只接受 `client_id=canteen` 的授权码。回调只允许 `https://4seas.xyz/canteen/auth/callback` 和当前的 workers.dev 回调 |
+
+原有的邮箱 magic link、Telegram、积分、签到、webhook 都还在 `/v1/...`，同一套路由也挂在 `/passport/v1/...`。
 
 接口需求文档(由 CommunityOS 项目提出):见 4Seas-CommunityOS 仓库 docs/06-community-account-system.md。
 
@@ -10,7 +22,11 @@ Community Account System, open source.
 
 | 模块 | 端点 | 说明 |
 | --- | --- | --- |
-| 账户 | POST /v1/auth/register, /verify-email, /login/request, /login/verify, /logout | 邮箱注册;验证 token 24h 一次性;登录为 magic link(token 15min 一次性);JWT 会话 |
+| 账户 | POST /v1/auth/register, /verify-email, /login/request, /login/verify, /passcode/request, /passcode/verify, /logout | 邮箱注册;magic link;6 位验证码。JWT 的 `sub` 就是这个人的编号 |
+| 登录页 | GET /passport/login | 给 CoLiving / 食堂跳转用。带 client_id、redirect_uri、state |
+| 合并登录 | POST /v1/connect/authorize, /v1/connect/token | 授权码交给 coliving 或 canteen。食堂要求已有 CoLiving 链接 |
+| 身份链接 | POST /v1/identity/links; GET /v1/identity/{sub} | 服务密钥。`identity:write` / `identity:read` |
+| Google / GitHub | GET /v1/auth/google/start, /github/start 及 callback | 已验证邮箱并入同一个 sub。未配置时 start 返回 422 |
 | 我的 | GET/PATCH /v1/me; POST/DELETE /v1/me/telegram | 资料;Telegram initData 官方算法验签绑定 |
 | 服务密钥 | POST/DELETE /v1/service-keys | Admin key 管理;secret 仅返回一次,库中只存 SHA-256;按 scope 鉴权 |
 | 用户 | GET /v1/users/{id} | scope: users:read |

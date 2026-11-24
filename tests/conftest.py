@@ -68,6 +68,14 @@ class MailCapture:
                         return part[len("token="):]
         raise AssertionError("no token email for " + to)
 
+    def last_code(self, to):
+        for msg in reversed(self.messages):
+            if msg["to"] == to:
+                for part in msg["body"].split():
+                    if part.startswith("code="):
+                        return part[len("code="):]
+        raise AssertionError("no passcode email for " + to)
+
 
 @pytest.fixture()
 def mail(monkeypatch):

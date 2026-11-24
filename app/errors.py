@@ -36,6 +36,13 @@ class Forbidden(AppError):
     status = 403
 
 
+class CanteenRequiresColiving(AppError):
+    """食堂只接待已经在 CoLiving 注册过的人。"""
+
+    code = "canteen_requires_coliving"
+    status = 403
+
+
 class Unprocessable(AppError):
     code = "unprocessable"
     status = 422
