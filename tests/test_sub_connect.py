@@ -1,5 +1,10 @@
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
+from app.models import Token, User
+from app.security import utcnow
+from app.services.connect_service import client_secret_ok
 from tests.test_auth import register_and_verify
 from tests.test_service_keys import create_service_key
 
@@ -162,6 +167,83 @@ def test_passcode_locks_after_five_failures(client, mail):
     assert locked.json()["error"]["code"] == "rate_limited"
 
 
+def test_expired_passcode_counts_toward_lock(client, mail, db):
+    email = register_and_verify(client, mail)
+    assert client.post("/v1/auth/passcode/request", json={"email": email}).status_code == 202
+    code = mail.last_code(email)
+    user = db.query(User).filter(User.email == email).one()
+    row = db.query(Token).filter(Token.user_id == user.id, Token.purpose == "passcode").one()
+    row.expires_at = utcnow() - timedelta(seconds=1)
+    db.commit()
+    expired = client.post("/v1/auth/passcode/verify", json={"email": email, "code": code})
+    assert expired.status_code == 410
+    for _ in range(4):
+        wrong = client.post("/v1/auth/passcode/verify", json={"email": email, "code": "000000"})
+        assert wrong.status_code == 401
+    locked = client.post("/v1/auth/passcode/verify", json={"email": email, "code": "000000"})
+    assert locked.status_code == 429
+
+
+def test_new_passcode_invalidates_the_previous_code(client, mail, db):
+    email = register_and_verify(client, mail)
+    assert client.post("/v1/auth/passcode/request", json={"email": email}).status_code == 202
+    first = mail.last_code(email)
+    user = db.query(User).filter(User.email == email).one()
+    row = db.query(Token).filter(Token.user_id == user.id, Token.purpose == "passcode").one()
+    row.created_at = utcnow() - timedelta(seconds=31)
+    db.commit()
+    assert client.post("/v1/auth/passcode/request", json={"email": email}).status_code == 202
+    second = mail.last_code(email)
+    assert second != first
+    old = client.post("/v1/auth/passcode/verify", json={"email": email, "code": first})
+    assert old.status_code == 401
+    new = client.post("/v1/auth/passcode/verify", json={"email": email, "code": second})
+    assert new.status_code == 200
+
+
+def test_concurrent_wrong_codes_cannot_pass_the_lock(client, mail):
+    email = register_and_verify(client, mail)
+    assert client.post("/v1/auth/passcode/request", json={"email": email}).status_code == 202
+    code = mail.last_code(email)
+
+    def guess(_n):
+        return client.post("/v1/auth/passcode/verify", json={"email": email, "code": "000000"}).status_code
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        statuses = list(pool.map(guess, range(40)))
+    assert statuses.count(401) <= 5
+    assert 429 in statuses
+    assert set(statuses) <= {401, 429}
+    locked = client.post("/v1/auth/passcode/verify", json={"email": email, "code": code})
+    assert locked.status_code == 429
+
+
+def test_blank_client_secret_never_matches(client, mail, monkeypatch):
+    assert client_secret_ok("", "") is False
+    assert client_secret_ok("dev-coliving-secret", "") is False
+    assert client_secret_ok("dev-coliving-secret", "dev-coliving-secret") is True
+    email = register_and_verify(client, mail)
+    token, _sub = passcode_login(client, mail, email)
+    issued = client.post(
+        "/v1/connect/authorize",
+        json={"client_id": "coliving", "redirect_uri": COLIVING, "state": "blank"},
+        headers={"Authorization": "Bearer " + token},
+    )
+    from app.services import connect_service
+
+    monkeypatch.setattr(connect_service.settings, "coliving_client_secret", "")
+    exchanged = client.post(
+        "/v1/connect/token",
+        json={
+            "client_id": "coliving",
+            "client_secret": "dev-coliving-secret",
+            "code": issued.json()["code"],
+            "redirect_uri": COLIVING,
+        },
+    )
+    assert exchanged.status_code == 401
+
+
 def test_production_rejects_published_client_secrets():
     from app.config import Settings, assert_client_secrets
 
@@ -191,6 +273,30 @@ def test_production_rejects_published_client_secrets():
         canteen_client_secret="real-canteen",
     )
     assert_client_secrets(ok) is None
+
+    spaced = Settings(
+        environment=" Production ",
+        coliving_client_secret=" dev-coliving-secret ",
+        canteen_client_secret="real-canteen",
+    )
+    try:
+        assert_client_secrets(spaced)
+    except RuntimeError as exc:
+        assert "coliving_client_secret" in str(exc)
+    else:
+        raise AssertionError("spaced published secret was accepted")
+
+    change_me = Settings(
+        environment="production",
+        coliving_client_secret="real-coliving",
+        canteen_client_secret="Change-me-canteen",
+    )
+    try:
+        assert_client_secrets(change_me)
+    except RuntimeError as exc:
+        assert "canteen_client_secret" in str(exc)
+    else:
+        raise AssertionError("mixed-case change-me secret was accepted")
 
 
 def test_bad_redirect_rejected(client, mail):

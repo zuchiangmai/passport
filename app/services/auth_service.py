@@ -86,13 +86,19 @@ def request_passcode(db: Session, email: str) -> None:
     email = email.lower()
     user = get_user_by_email(db, email)
     if user and user.verified:
-        recent = (
+        latest = (
             db.query(Token)
-            .filter(Token.user_id == user.id, Token.purpose == "passcode", Token.consumed_at.is_(None))
+            .filter(Token.user_id == user.id, Token.purpose == "passcode")
             .order_by(Token.created_at.desc())
             .first()
         )
-        if not recent or recent.created_at < utcnow() - timedelta(seconds=30):
+        if not latest or latest.created_at < utcnow() - timedelta(seconds=30):
+            now = utcnow()
+            db.query(Token).filter(
+                Token.user_id == user.id,
+                Token.purpose == "passcode",
+                Token.consumed_at.is_(None),
+            ).update({Token.consumed_at: now}, synchronize_session=False)
             code = f"{__import__('secrets').randbelow(1000000):06d}"
             db.add(
                 Token(
@@ -100,13 +106,14 @@ def request_passcode(db: Session, email: str) -> None:
                     user_id=user.id,
                     purpose="passcode",
                     token_hash=hash_secret(f"{code}:{email}"),
-                    expires_at=utcnow() + timedelta(minutes=settings.passcode_ttl_minutes),
+                    expires_at=now + timedelta(minutes=settings.passcode_ttl_minutes),
                 )
             )
             send_email(email, "Your 4Seas login code", "code=" + code)
     db.commit()
 
 
+# Five wrong or expired codes in this window lock the address. Knowing the address is enough to trigger it.
 PASSCODE_MAX_FAILURES = 5
 PASSCODE_LOCK_MINUTES = 15
 
@@ -137,6 +144,16 @@ def _passcode_failures(db: Session, user: User) -> int:
     )
 
 
+def _reject_passcode(db: Session, user: User, *, expired: bool) -> None:
+    """Commit the failure before deciding, so concurrent guesses cannot all pass the old count."""
+    _record_passcode_failure(db, user)
+    if _passcode_failures(db, user) > PASSCODE_MAX_FAILURES:
+        raise RateLimited("too many attempts")
+    if expired:
+        raise Gone("code expired")
+    raise Unauthorized("invalid code")
+
+
 def verify_passcode(db: Session, email: str, code: str) -> User:
     email = email.lower()
     code = code.strip()
@@ -150,11 +167,12 @@ def verify_passcode(db: Session, email: str, code: str) -> User:
     )
     if not token or token.consumed_at is not None or not user or user.email != email or not user.verified:
         if user and user.verified:
-            _record_passcode_failure(db, user)
+            _reject_passcode(db, user, expired=False)
         raise Unauthorized("invalid code")
     if token.expires_at < utcnow():
-        _record_passcode_failure(db, user)
-        raise Gone("code expired")
+        _reject_passcode(db, user, expired=True)
+    if _passcode_failures(db, user) >= PASSCODE_MAX_FAILURES:
+        raise RateLimited("too many attempts")
     token.consumed_at = utcnow()
     db.query(Token).filter(Token.user_id == user.id, Token.purpose == "passcode_fail").delete()
     audit_mod.audit(db, "system", None, "auth.passcode", {"user_id": user.id})

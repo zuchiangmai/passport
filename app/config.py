@@ -46,14 +46,20 @@ class Settings(BaseSettings):
 PUBLISHED_CLIENT_SECRETS = frozenset({"dev-coliving-secret", "dev-canteen-secret"})
 
 
+def _plain(value: object) -> str:
+    return str(value or "").strip()
+
+
 def assert_client_secrets(settings: Settings | None = None) -> None:
     """Fail closed in production when a connect client secret was left unset or published."""
     settings = settings or get_settings()
-    if settings.environment != "production":
+    if _plain(settings.environment).lower() != "production":
         return
+    published = {item.casefold() for item in PUBLISHED_CLIENT_SECRETS}
     for name in ("coliving_client_secret", "canteen_client_secret"):
-        value = getattr(settings, name)
-        if not value or value in PUBLISHED_CLIENT_SECRETS or value.startswith("change-me"):
+        value = _plain(getattr(settings, name))
+        folded = value.casefold()
+        if not value or folded in published or folded.startswith("change-me"):
             raise RuntimeError(f"{name} must be a private value when environment=production")
 
 

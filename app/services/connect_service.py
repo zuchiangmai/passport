@@ -15,6 +15,15 @@ from .identity_service import has_coliving, snapshot
 
 settings = get_settings()
 
+
+def client_secret_ok(presented: str | None, expected: str | None) -> bool:
+    """A blank configured secret never matches, including a blank presented secret."""
+    presented_text = (presented or "").strip()
+    expected_text = (expected or "").strip()
+    if not expected_text or not presented_text:
+        return False
+    return hmac.compare_digest(presented_text, expected_text)
+
 # Exact redirect URIs. Canteen is moving onto 4seas.xyz/canteen; the workers.dev
 # host is the current deployment and is allowed until that cutover.
 CLIENTS = {
@@ -68,8 +77,7 @@ def authorize(db: Session, user: User, client_id: str, redirect_uri: str, state:
 def exchange(db: Session, client_id: str, client_secret: str, code: str, redirect_uri: str) -> dict:
     client = _client(client_id)
     expected = getattr(settings, client["secret_attr"])
-    # Empty means the secret was not configured. Never fall back to a value that is in the source tree.
-    if not expected or not client_secret or not hmac.compare_digest(client_secret, expected):
+    if not client_secret_ok(client_secret, expected):
         raise Unauthorized("invalid client")
     check_redirect(client_id, redirect_uri)
     row = db.query(AuthCode).filter(AuthCode.code_hash == hash_secret(code)).one_or_none()
