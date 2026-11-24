@@ -2,8 +2,15 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
+
+from app.db import Base
+from app.errors import RateLimited, Unauthorized
 from app.models import Token, User
 from app.security import utcnow
+from app.services import auth_service
 from app.services.connect_service import client_secret_ok
 from tests.test_auth import register_and_verify
 from tests.test_service_keys import create_service_key
@@ -201,21 +208,67 @@ def test_new_passcode_invalidates_the_previous_code(client, mail, db):
     assert new.status_code == 200
 
 
-def test_concurrent_wrong_codes_cannot_pass_the_lock(client, mail):
-    email = register_and_verify(client, mail)
-    assert client.post("/v1/auth/passcode/request", json={"email": email}).status_code == 202
-    code = mail.last_code(email)
+def test_concurrent_wrong_codes_cannot_pass_the_lock(tmp_path, monkeypatch):
+    """File sqlite, one connection per thread. The shared StaticPool connection crashes and flakes."""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'lock.sqlite'}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+        poolclass=NullPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _busy_timeout(dbapi_conn, _record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
+
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    sent = {}
+
+    def capture(_to, _subject, body):
+        sent["code"] = body.split("code=", 1)[1].split()[0]
+
+    monkeypatch.setattr(auth_service, "send_email", capture)
+    email = unique_email()
+    setup = Session()
+    try:
+        setup.add(User(id=uuid.uuid4().hex, email=email, verified=True))
+        setup.commit()
+        auth_service.request_passcode(setup, email)
+    finally:
+        setup.close()
+    code = sent["code"]
 
     def guess(_n):
-        return client.post("/v1/auth/passcode/verify", json={"email": email, "code": "000000"}).status_code
+        one = Session()
+        try:
+            try:
+                auth_service.verify_passcode(one, email, "000000")
+            except RateLimited:
+                return 429
+            except Unauthorized:
+                return 401
+            return 200
+        finally:
+            one.close()
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         statuses = list(pool.map(guess, range(40)))
-    assert statuses.count(401) <= 5
+    assert statuses.count(401) <= 5, statuses
     assert 429 in statuses
-    assert set(statuses) <= {401, 429}
-    locked = client.post("/v1/auth/passcode/verify", json={"email": email, "code": code})
-    assert locked.status_code == 429
+    assert set(statuses) <= {401, 429}, statuses
+    last = Session()
+    try:
+        try:
+            auth_service.verify_passcode(last, email, code)
+        except RateLimited:
+            return
+        raise AssertionError("correct code was accepted after the lock")
+    finally:
+        last.close()
+        engine.dispose()
 
 
 def test_blank_client_secret_never_matches(client, mail, monkeypatch):
