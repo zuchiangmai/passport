@@ -17,6 +17,8 @@ os.environ.setdefault("CHECKIN_SECRET", "test-checkin-secret")
 os.environ.setdefault("ADMIN_KEY", "test-admin-key")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-bot-token")
 os.environ.setdefault("EMAIL_BACKEND", "console")
+os.environ.setdefault("COLIVING_CLIENT_SECRET", "dev-coliving-secret")
+os.environ.setdefault("CANTEEN_CLIENT_SECRET", "dev-canteen-secret")
 
 from app.db import Base, get_db
 from app.main import app
@@ -67,6 +69,14 @@ class MailCapture:
                     if part.startswith("token="):
                         return part[len("token="):]
         raise AssertionError("no token email for " + to)
+
+    def last_code(self, to):
+        for msg in reversed(self.messages):
+            if msg["to"] == to:
+                for part in msg["body"].split():
+                    if part.startswith("code="):
+                        return part[len("code="):]
+        raise AssertionError("no passcode email for " + to)
 
 
 @pytest.fixture()

@@ -21,8 +21,14 @@ class LoginVerifyIn(BaseModel):
     token: str
 
 
+class PasscodeVerifyIn(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6)
+
+
 class UserOut(BaseModel):
     user_id: str
+    sub: str
     email: str
     verified: bool
     display_name: str | None = None
@@ -39,6 +45,7 @@ class UserOut(BaseModel):
         if not isinstance(data, dict) and hasattr(data, "id"):
             return {
                 "user_id": data.id,
+                "sub": data.id,
                 "email": data.email,
                 "verified": data.verified,
                 "display_name": data.display_name,
@@ -52,6 +59,8 @@ class UserOut(BaseModel):
             }
         if isinstance(data, dict) and "user_id" not in data and "id" in data:
             data = {**data, "user_id": data["id"]}
+        if isinstance(data, dict) and "sub" not in data:
+            data = {**data, "sub": data.get("user_id") or data.get("id")}
         return data
 
 

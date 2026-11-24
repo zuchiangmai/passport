@@ -31,8 +31,20 @@ class Unauthorized(AppError):
     status = 401
 
 
+class RateLimited(AppError):
+    code = "rate_limited"
+    status = 429
+
+
 class Forbidden(AppError):
     code = "forbidden"
+    status = 403
+
+
+class CanteenRequiresColiving(AppError):
+    """食堂只接待已经在 CoLiving 注册过的人。"""
+
+    code = "canteen_requires_coliving"
     status = 403
 
 

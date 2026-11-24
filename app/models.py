@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -109,6 +109,52 @@ class WebhookDelivery(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")  # pending | delivered | failed
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class AppLink(Base):
+    """One local account in CoLiving or the canteen, tied to a Passport sub."""
+
+    __tablename__ = "app_links"
+    __table_args__ = (
+        UniqueConstraint("user_id", "app", name="uq_app_links_user_app"),
+        UniqueConstraint("app", "external_id", name="uq_app_links_app_external"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: __import__("uuid").uuid4().hex)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    app: Mapped[str] = mapped_column(String(32))  # coliving | canteen
+    external_id: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class AuthCode(Base):
+    """One-time code a relying party exchanges for a token that carries sub."""
+
+    __tablename__ = "auth_codes"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: __import__("uuid").uuid4().hex)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    client_id: Mapped[str] = mapped_column(String(32))
+    redirect_uri: Mapped[str] = mapped_column(String(1000))
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class OAuthTransaction(Base):
+    """Browser start of Google or GitHub, before the provider redirects back."""
+
+    __tablename__ = "oauth_transactions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: __import__("uuid").uuid4().hex)
+    provider: Mapped[str] = mapped_column(String(16))
+    client_id: Mapped[str] = mapped_column(String(32))
+    redirect_uri: Mapped[str] = mapped_column(String(1000))
+    client_state: Mapped[str] = mapped_column(String(500))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
