@@ -1,5 +1,11 @@
 # passport
 
+## FastAPI 归档与回滚
+
+这里保留 Passport 旧版 FastAPI 签发服务。令牌的 `sub` 等于 `users.id`。旧服务支持邮箱一次性验证码、Google 和 GitHub 登录，以及应用身份关联（identity links）。食堂授权要求账号已关联 CoLiving 身份，否则返回 `403 canteen_requires_coliving`。
+
+线上服务正在迁移到运行在 Cloudflare Workers 上、使用 D1 的 Better Auth，旧版代码因此归档。需要回滚时，使用现有的 `sub-login` checkout，或在可切换的工作树中运行 `git checkout sub-login` 或 `git checkout main`。为 Better Auth 使用独立的 Worker 名称，保留现有的 Cloudflare Worker `passport` 供回滚使用。
+
 Community Account System, open source.
 
 4Seas 生态的统一账户与资产层。对外地址是 `https://4seas.xyz/passport`（不是单独子域）。业务系统只认 Passport 的 `sub`，不各自发一套账号主键。
@@ -40,9 +46,9 @@ Community Account System, open source.
 ## Quickstart(本地)
 
     git clone git@github.com:4seas-community/Community-Account-System.git
-    cd Community-Account-System
+    cd Community-Account-System/archive/fastapi
     python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-    cp .env.example .env
+    cp ../../.env.example .env
     .venv/bin/alembic upgrade head
     .venv/bin/uvicorn app.main:app --reload --port 8000
 
