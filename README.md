@@ -15,6 +15,8 @@ pnpm exec wrangler dev --port 8788
 
 Run `pnpm typecheck` and `node --test src/*.test.ts src/*/*.test.ts` for the automated checks.
 
+Login and consent use the [Homepage shared page header and footer](https://github.com/4seas-community/homepage/tree/main/site-chrome). Wrangler copies the pinned package assets into the Worker’s static assets during its build. Use `/passport/en/login`, `/passport/zh/login`, or `/passport/th/login` to open a specific language.
+
 ## Google and GitHub sign-in
 
 Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, and `GITHUB_CLIENT_SECRET` as encrypted secrets on the `passport-auth` Worker. Register these exact callback URLs in the corresponding provider settings:
