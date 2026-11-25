@@ -1,0 +1,232 @@
+function escapeHtml(value: string) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+
+function page(title: string, query: string, content: string, script: string, attrs = "", subtitle = "") {
+  const nonce = crypto.randomUUID();
+  return new Response(`<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title} · 4Seas Passport</title>
+<style nonce="${nonce}">
+  :root{color-scheme:light;--bg:#f8f9fa;--fg:#212529;--muted:#6c757d;--line:#dee2e6;--card:#fff}
+  body{margin:0;padding:20px;background:var(--bg);color:var(--fg);
+    font:15px/1.7 ui-sans-serif,system-ui,-apple-system,"Noto Sans SC","Noto Sans Thai",sans-serif}
+  main{max-width:440px;margin:60px auto;padding:32px 24px;background:var(--card);
+    border:1px solid var(--line);border-radius:20px;box-shadow:0 4px 24px rgba(0,0,0,.04)}
+  .intro{text-align:center;margin-bottom:28px}
+  header{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  h1{font-size:24px;font-weight:700;margin:8px 0}
+  .sub{margin:0;font-size:14px;color:var(--muted);line-height:1.5}
+  label{display:block;margin-bottom:6px;font-size:13px;font-weight:500}
+  input,button{box-sizing:border-box;font:inherit}
+  input{width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--line);background:var(--bg);font-size:15px}
+  button{display:flex;align-items:center;justify-content:center;width:100%;min-height:45px;padding:10px 20px;
+    border-radius:24px;border:1px solid #004a33;background:#004a33;color:#fffefa;font-size:15px;font-weight:500;cursor:pointer}
+  button.secondary{background:var(--bg);color:var(--fg);border-color:var(--line);font-size:14px;font-weight:500}
+  button:disabled{opacity:.5;cursor:wait}
+  form{display:grid;gap:16px}
+  form + form{margin-top:16px}
+  .actions{display:grid;gap:10px;margin-bottom:24px}
+  .actions button{gap:12px}
+  .mark{width:18px;height:18px;flex:none}
+  .or{display:flex;align-items:center;gap:12px;margin:0 0 24px;color:var(--muted);font-size:12px;text-transform:uppercase}
+  .or::before,.or::after{content:"";flex:1;height:1px;background:var(--line)}
+  dd{margin:0 0 .7rem;overflow-wrap:anywhere}
+  #status{min-height:1.6rem;margin-bottom:0}
+</style>
+</head>
+<body>
+<main data-oauth-query="${escapeHtml(query)}" ${attrs}>
+<div class="intro">
+<header>4Seas</header>
+<h1>${title}</h1>
+${subtitle ? `<p class="sub">${subtitle}</p>` : ""}
+</div>
+${content}
+<p id="status" role="status"></p>
+</main>
+<script nonce="${nonce}">
+const status = document.querySelector("#status");
+const oauthQuery = document.querySelector("main").dataset.oauthQuery;
+async function api(path, body) {
+  const options = { headers: { Accept: "application/json" } };
+  if (body !== undefined) {
+    options.method = "POST";
+    options.headers["Content-Type"] = "application/json";
+    options.body = JSON.stringify(body);
+  }
+  const prefix = location.pathname === "/passport" || location.pathname.startsWith("/passport/") ? "/passport" : "";
+  const response = await fetch(prefix + "/api/auth" + path, options);
+  if (!response.ok) {
+    if (response.status === 429) throw new Error("请求过于频繁，请稍后再试。");
+    throw new Error("操作失败，请检查输入或稍后重试。");
+  }
+  return response.json();
+}
+async function act(button, action) {
+  button.disabled = true;
+  status.textContent = "";
+  try { await action(); }
+  catch (error) { status.textContent = error.message || "操作失败，请重试。"; }
+  finally { button.disabled = false; }
+}
+function finish(result, fallback) {
+  if (result.redirect === true && typeof result.url === "string") {
+    const url = new URL(result.url, window.location.origin);
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("回调地址无效。");
+    window.location.assign(url);
+  } else {
+    status.textContent = fallback;
+  }
+}
+${script}
+</script>
+</body>
+</html>`, {
+    headers: {
+      "Content-Type": "text/html; charset=UTF-8",
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'`,
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+export function signInPage(
+  query: string,
+  legacy: { clientId: string; redirectUri: string; state: string },
+) {
+  const attrs = `data-client-id="${escapeHtml(legacy.clientId)}" data-redirect-uri="${escapeHtml(legacy.redirectUri)}" data-state="${escapeHtml(legacy.state)}"`;
+  return page("登录", query, `
+<div class="actions">
+  <button class="secondary" data-provider="google"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>使用 Google 账号登录</button>
+  <button class="secondary" data-provider="github"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg>使用 GitHub 账号登录</button>
+  <button id="passkey" class="secondary"><svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M14.5 2a5.5 5.5 0 0 0-5.4 6.6L2 15.7V20h4.3v-2.2H8.5v-2.2h2.2l2.2-2.2A5.5 5.5 0 1 0 14.5 2zm1.8 4.2a1.4 1.4 0 1 1 0 2.8 1.4 1.4 0 0 1 0-2.8z"/></svg>使用通行密钥</button>
+</div>
+<p class="or">或使用邮箱验证码</p>
+<form id="request-code">
+  <div>
+    <label for="email">注册或常用邮箱</label>
+    <input id="email" type="email" autocomplete="email" placeholder="name@example.com" required>
+  </div>
+  <button type="submit">发送验证码登录</button>
+</form>
+<form id="verify-code" hidden>
+  <div>
+    <label for="code">6 位数字验证码</label>
+    <input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+  </div>
+  <button type="submit">确认登录</button>
+</form>`, `
+const mainEl = document.querySelector("main");
+const legacy = {
+  clientId: mainEl.dataset.clientId || "",
+  redirectUri: mainEl.dataset.redirectUri || "",
+  state: mainEl.dataset.state || "",
+};
+async function continueLegacy() {
+  if (!legacy.clientId || !legacy.redirectUri || !legacy.state) return false;
+  const prefix = location.pathname === "/passport" || location.pathname.startsWith("/passport/") ? "/passport" : "";
+  const response = await fetch(prefix + "/v1/connect/authorize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({
+      client_id: legacy.clientId,
+      redirect_uri: legacy.redirectUri,
+      state: legacy.state,
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const code = payload.code || payload.error?.code;
+    if (code === "canteen_requires_coliving") throw new Error("需要先完成 CoLiving 注册。");
+    throw new Error("无法回到应用。");
+  }
+  const url = new URL(payload.redirect_to, window.location.origin);
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("回调地址无效。");
+  window.location.assign(url);
+  return true;
+}
+const requestForm = document.querySelector("#request-code");
+const verifyForm = document.querySelector("#verify-code");
+const email = document.querySelector("#email");
+const code = document.querySelector("#code");
+let requestedEmail = "";
+const oauth = oauthQuery ? { oauth_query: oauthQuery } : {};
+if (legacy.clientId && legacy.redirectUri && legacy.state) {
+  fetch((location.pathname === "/passport" || location.pathname.startsWith("/passport/") ? "/passport" : "") + "/api/auth/get-session", {
+    headers: { Accept: "application/json" },
+  }).then(async (response) => {
+    if (!response.ok) return;
+    const session = await response.json().catch(() => null);
+    if (session?.user) await continueLegacy();
+  }).catch(() => {});
+}
+requestForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  act(event.submitter, async () => {
+    const target = email.value.trim().toLowerCase();
+    await api("/email-otp/send-verification-otp", { email: target, type: "sign-in" });
+    requestedEmail = target;
+    verifyForm.hidden = false;
+    code.focus();
+    status.textContent = "验证码已请求，请检查邮箱。";
+  });
+});
+verifyForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  act(event.submitter, async () => {
+    if (email.value.trim().toLowerCase() !== requestedEmail) throw new Error("邮箱已更改，请重新发送验证码。");
+    const result = await api("/sign-in/email-otp", { email: requestedEmail, otp: code.value, ...oauth });
+    if (await continueLegacy()) return;
+    finish(result, "已登录。");
+  });
+});
+for (const button of document.querySelectorAll("[data-provider]")) {
+  button.addEventListener("click", () => act(button, async () => {
+    finish(await api("/sign-in/social", {
+      provider: button.dataset.provider,
+      callbackURL: window.location.href,
+      disableRedirect: true,
+      ...oauth,
+    }), "无法开始第三方登录。");
+  }));
+}
+const passkey = document.querySelector("#passkey");
+passkey.addEventListener("click", () => act(passkey, async () => {
+  if (!window.PublicKeyCredential?.parseRequestOptionsFromJSON) {
+    throw new Error("当前浏览器无法使用通行密钥，请使用验证码登录。");
+  }
+  const options = await api("/passkey/generate-authenticate-options");
+  const publicKey = PublicKeyCredential.parseRequestOptionsFromJSON(options);
+  const credential = await navigator.credentials.get({ publicKey });
+  if (!credential) throw new Error("已取消通行密钥登录。");
+  finish(await api("/passkey/verify-authentication", { response: credential.toJSON(), ...oauth }), "已登录。");
+}));`, attrs, "一个账号进入 CoLiving 和食堂");
+}
+
+export function consentPage(query: string, client: string, scope: string) {
+  return page("授权应用", query, `
+<dl>
+  <dt>应用</dt><dd>${escapeHtml(client)}</dd>
+  <dt>请求权限</dt><dd>${escapeHtml(scope || "默认权限")}</dd>
+</dl>
+<form id="consent" class="actions">
+  <button type="submit" value="allow">同意</button>
+  <button type="submit" value="deny" class="secondary">拒绝</button>
+</form>`, `
+document.querySelector("#consent").addEventListener("submit", (event) => {
+  event.preventDefault();
+  act(event.submitter, async () => {
+    finish(await api("/oauth2/consent", {
+      accept: event.submitter.value === "allow",
+      oauth_query: oauthQuery,
+    }), "授权已处理。");
+  });
+});`);
+}
