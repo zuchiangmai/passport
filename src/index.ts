@@ -124,7 +124,7 @@ async function linkIdentity(db: D1Database, body: Record<string, unknown>) {
     // An existing external ID may not provision a second user.
     await db.prepare(`
       INSERT INTO user (id, email, emailVerified, name, createdAt, updatedAt)
-      SELECT ?1, ?2, 1, ?3, ?4, ?4
+      SELECT ?1, ?2, 0, ?3, ?4, ?4
       WHERE NOT EXISTS (SELECT 1 FROM app_link WHERE app = ?5 AND external_id = ?6)
       ON CONFLICT(email) DO NOTHING
     `).bind(crypto.randomUUID(), email, name?.trim() ?? "", now, app, externalId.trim()).run();
@@ -135,15 +135,12 @@ async function linkIdentity(db: D1Database, body: Record<string, unknown>) {
 
   await ensureLink(db, { sub: user.id, app, externalId });
   const displayName = name?.trim() || "";
-  if ((app === "coliving" && !user.emailVerified) || (displayName && !user.name)) {
+  if (displayName && !user.name) {
     user = await db.prepare(`
       UPDATE user SET
-        emailVerified = CASE WHEN ?1 = 'coliving' THEN 1 ELSE emailVerified END,
-        name = CASE WHEN name = '' THEN ?2 ELSE name END,
-        updatedAt = ?3
-      WHERE id = ?4 RETURNING id, email, emailVerified, name
-    `).bind(app, displayName, new Date().toISOString(), user.id).first<UserRow>();
-    if (!user) return error(404, "not_found");
+        name = ?1, updatedAt = ?2
+      WHERE id = ?3 AND name = '' RETURNING id, email, emailVerified, name
+    `).bind(displayName, new Date().toISOString(), user.id).first<UserRow>() ?? user;
   }
   return Response.json(snapshot(passportUser(user), await appLinks(db, user.id)), {
     headers: { "Cache-Control": "no-store" },

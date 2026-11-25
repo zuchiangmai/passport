@@ -59,7 +59,15 @@ export function normalizeEmail(value: unknown): string | null {
 function provider(id?: string, secret?: string) {
   const clientId = id?.trim();
   const clientSecret = secret?.trim();
-  return clientId && clientSecret ? { clientId, clientSecret, requireEmailVerification: true } : undefined;
+  return clientId && clientSecret ? {
+    clientId,
+    clientSecret,
+    requireEmailVerification: true,
+    getAccountFields(_tokens: unknown, userInfo: { emailVerified: boolean }) {
+      if (!userInfo.emailVerified) throw new APIError("FORBIDDEN", { code: "email_not_verified" });
+      return undefined;
+    },
+  } : undefined;
 }
 
 export function socialProviders(env: Env) {
@@ -124,6 +132,7 @@ export function createAuth(env: Env, ctx: ExecutionContext) {
         loginPage: "/sign-in",
         consentPage: "/consent",
         allowDynamicClientRegistration: false,
+        clientPrivileges: () => false,
       }),
       emailOTP({
         otpLength: 6,
