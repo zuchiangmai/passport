@@ -158,3 +158,4 @@ venv/
 .dev.vars.*
 !.dev.vars.example
 .wrangler/
+/public/passport/site-chrome/

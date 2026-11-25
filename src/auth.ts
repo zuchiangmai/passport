@@ -5,6 +5,8 @@ import { APIError, createAuthMiddleware } from "better-auth/api";
 import { emailOTP, jwt } from "better-auth/plugins";
 import { checkResend, type OtpRow } from "./email/otp-policy.ts";
 import { sendResendEmail } from "./email/resend.ts";
+import { OTP_TTL_MINUTES, signInCodeEmail } from "./email/sign-in-code.ts";
+import { passportLanguage, preferredLanguage } from "./locale.ts";
 
 export const AUTH_PATH = "/api/auth";
 export const SEND_OTP = "/email-otp/send-verification-otp";
@@ -129,28 +131,30 @@ export function createAuth(env: Env, ctx: ExecutionContext) {
     plugins: [
       jwt({ disableSettingJwtHeader: true, jwt: { issuer, audience: issuer } }),
       oauthProvider({
-        loginPage: "/sign-in",
-        consentPage: "/consent",
+        loginPage: `${issuer}/sign-in`,
+        consentPage: `${issuer}/consent`,
         allowDynamicClientRegistration: false,
         clientPrivileges: () => false,
       }),
       emailOTP({
         otpLength: 6,
-        expiresIn: 900,
+        expiresIn: OTP_TTL_MINUTES * 60,
         allowedAttempts: 5,
         storeOTP: "hashed",
         disableSignUp: false,
-        async sendVerificationOTP({ email, otp, type }) {
+        async sendVerificationOTP({ email, otp, type }, request) {
           if (type !== "sign-in" || env.EMAIL_BACKEND !== "resend" || !env.RESEND_API_KEY) return;
           const apiKey = env.RESEND_API_KEY;
           const from = env.MAIL_FROM;
+          const headers = request?.headers;
+          const language = passportLanguage(headers?.get("x-passport-language")) ??
+            preferredLanguage(headers?.get("accept-language"));
           ctx.waitUntil((async () => {
             const result = await sendResendEmail({
               apiKey,
               from,
               to: email,
-              subject: "4Seas Passport 登录验证码",
-              text: `你的登录验证码是 ${otp}，15 分钟内有效。`,
+              ...signInCodeEmail(language, otp),
               tag: "passport_otp",
             });
             if (!result.ok) console.error("passport mail failed", result.error);

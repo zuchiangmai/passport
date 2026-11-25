@@ -5,6 +5,7 @@ import {
 } from "@better-auth/oauth-provider";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { AUTH_PATH, authHandlerPath, authRouteBase, createAuth, normalizeEmail, SEND_OTP, SIGN_IN_OTP, type Env } from "./auth.ts";
+import { passportLanguage, preferredLanguage } from "./locale.ts";
 import { consentPage, signInPage } from "./pages.ts";
 import { checkRedirect, client_secret_ok, PolicyError } from "./policy/clients.ts";
 import { authorizeGate, ensureLink, hasColiving, snapshot, type AppLink } from "./policy/links.ts";
@@ -49,7 +50,7 @@ function otpRequest(auth: Auth, request: Request, issuer: string, endpoint: stri
   url.pathname = authRouteBase(issuer).basePath + endpoint;
   url.search = "";
   const headers = new Headers({ "Content-Type": "application/json", Accept: "application/json" });
-  for (const name of ["cf-connecting-ip", "origin", "referer", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"]) {
+  for (const name of ["accept-language", "cf-connecting-ip", "origin", "referer", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
@@ -233,14 +234,14 @@ async function exchange(env: Env, body: Record<string, unknown>) {
 }
 
 async function handle(request: Request, env: Env, ctx: ExecutionContext) {
+  const incoming = new URL(request.url);
   if (request.method === "GET" || request.method === "HEAD") {
-    const raw = new URL(request.url);
-    if (raw.pathname === "/passport" || raw.pathname === "/passport/") {
-      raw.pathname = "/passport/login";
-      return Response.redirect(raw.toString(), 302);
+    if (incoming.pathname === "/passport" || incoming.pathname === "/passport/") {
+      incoming.pathname = "/passport/login";
+      return Response.redirect(incoming.toString(), 302);
     }
   }
-  const handlerPath = authHandlerPath(new URL(request.url).pathname, env.BETTER_AUTH_URL);
+  const handlerPath = authHandlerPath(incoming.pathname, env.BETTER_AUTH_URL);
   if (handlerPath) {
     const authUrl = new URL(request.url);
     if (authUrl.pathname !== handlerPath) {
@@ -264,16 +265,24 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
     if (path === "/.well-known/openid-configuration" || path === AUTH_PATH + "/.well-known/openid-configuration") {
       return oauthProviderOpenIdConfigMetadata(createAuth(env, ctx))(request);
     }
-    if (path === "/sign-in" || path === "/login" || path === "/consent") {
+    const pageRoute = /^\/(?:(en|zh|th)\/)?(sign-in|login|consent)\/?$/.exec(path);
+    if (pageRoute) {
+      const [, locale, route] = pageRoute;
+      const location = {
+        language: passportLanguage(locale) ?? preferredLanguage(request.headers.get("accept-language")),
+        prefix: incoming.pathname.startsWith("/passport/") ? "/passport" : "",
+        route,
+        search: incoming.search,
+      };
       const auth = createAuth(env, ctx);
       const query = url.searchParams.toString();
       const signed = url.searchParams.has("sig");
-      if ((signed || path === "/consent") &&
+      if ((signed || route === "consent") &&
           !(await verifyOAuthQueryParams(query, (await auth.$context).secret))) {
         return error(400, "invalid_oauth_query");
       }
-      if (path === "/sign-in" || path === "/login") {
-        return signInPage(signed ? query : "", {
+      if (route !== "consent") {
+        return signInPage(location, signed ? query : "", {
           clientId: url.searchParams.get("client_id") ?? "",
           redirectUri: url.searchParams.get("redirect_uri") ?? "",
           state: url.searchParams.get("state") ?? "",
@@ -281,7 +290,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
       }
       const session = await auth.api.getSession({ headers: request.headers });
       if (!session) return error(401, "unauthorized");
-      return consentPage(query, url.searchParams.get("client_id") ?? "", url.searchParams.get("scope") ?? "");
+      return consentPage(location, query, url.searchParams.get("client_id") ?? "", url.searchParams.get("scope") ?? "");
     }
   }
   if (request.method === "POST") {
