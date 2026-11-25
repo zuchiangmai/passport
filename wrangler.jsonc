@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "passport-auth",
+  "account_id": "7bf23342f21baa5ebfc7bc7b74f5a1f2",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "logs": { "invocation_logs": false }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "passport-auth",
+      "database_id": "REPLACE_AFTER_CREATE"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "development",
+    "EMAIL_BACKEND": "console",
+    "BETTER_AUTH_URL": "http://127.0.0.1:8788",
+    "MAIL_FROM": "4Seas Passport <no-reply@idoris.ai>"
+  }
+}
