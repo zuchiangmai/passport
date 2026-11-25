@@ -29,10 +29,12 @@ function page(location: PageLocation, title: string, query: string, content: str
   :root{color-scheme:light;--bg:#f8f9fa;--fg:#212529;--muted:#6c757d;--line:#dee2e6;--card:#fff}
   body{margin:0;background:var(--bg);color:var(--fg);min-height:100vh;display:flex;flex-direction:column;
     font:15px/1.7 ui-sans-serif,system-ui,-apple-system,"Noto Sans SC","Noto Sans Thai",sans-serif}
-  .passport-card{box-sizing:border-box;width:min(440px,calc(100% - 32px));margin:clamp(12px,5vh,40px) auto;padding:24px 18px;background:var(--card);
+  .passport-card{box-sizing:border-box;width:min(840px,calc(100% - 32px));margin:24px auto;padding:28px 18px;background:var(--card);
     border:1px solid var(--line);border-radius:20px;box-shadow:0 4px 24px rgba(0,0,0,.04)}
+  .passport-content{width:100%;max-width:540px;margin-inline:auto}
   .intro{text-align:center;margin-bottom:18px}
-  .passport-brand{margin:0;font-size:13px;letter-spacing:.08em;color:var(--muted)}
+  .passport-brand{display:inline-flex;align-items:center;gap:9px;margin:0;font-size:14px;font-weight:600;letter-spacing:.03em;color:#005040}
+  .passport-brand img{width:24px;height:24px;border-radius:6px}
   h1{font-size:24px;font-weight:700;margin:8px 0}
   .sub{margin:0;font-size:14px;color:var(--muted);line-height:1.5}
   .passport-card :is(input,button){box-sizing:border-box;font:inherit}
@@ -55,18 +57,30 @@ function page(location: PageLocation, title: string, query: string, content: str
   #status{margin:0}
   #status:not(:empty){margin-top:12px;padding:8px 12px;border-radius:8px;font-weight:600;color:#087443;background:#e8f7ee}
   #status[data-kind="error"]:not(:empty){color:#a32222;background:#fceaea}
+  @media (min-width:700px){
+    .passport-card{display:grid;align-content:center;min-height:600px;margin:clamp(56px,9vh,88px) auto;padding:52px 64px}
+    .passport-card .intro{margin-bottom:30px}
+    .passport-card h1{font-size:42px;line-height:1.15;margin:12px 0}
+    .passport-card .sub{font-size:17px}
+    .passport-card .actions{gap:12px;margin-bottom:22px}
+    .passport-card .or{margin-bottom:16px}
+    .passport-card button,.passport-card .code-row input,.passport-card .code-row button{min-height:50px}
+    .code-row + .code-row{margin-top:12px}
+  }
 </style>
 </head>
 <body>
 ${renderHeader({ assetBase, locale: language, languages })}
 <main class="passport-card" data-oauth-query="${escapeHtml(query)}" ${attrs}>
+<div class="passport-content">
 <div class="intro">
-<p class="passport-brand">4Seas Passport</p>
+<p class="passport-brand"><img src="/passport/brand-mark.jpg" width="24" height="24" alt="">4Seas Passport</p>
 <h1>${escapeHtml(title)}</h1>
 ${subtitle ? `<p class="sub">${escapeHtml(subtitle)}</p>` : ""}
 </div>
 ${content}
 <p id="status" role="status"></p>
+</div>
 </main>
 ${renderFooter({ assetBase, locale: language })}
 <script type="module" nonce="${nonce}" src="${assetBase}/chrome.js?v=${VERSION}"></script>
@@ -102,14 +116,15 @@ async function act(button, action) {
   catch (error) { showStatus(error instanceof FeedbackError ? error.message : copy.failed, "error"); }
   finally { button.disabled = false; }
 }
-function finish(result, fallback, kind = "success") {
-  if (result.redirect === true && typeof result.url === "string") {
-    const url = new URL(result.url, window.location.origin);
-    if (url.protocol !== "https:" && url.protocol !== "http:") throw new FeedbackError(copy.badRedirect);
-    window.location.assign(url);
-  } else {
-    showStatus(fallback, kind);
-  }
+function followRedirect(target) {
+  if (typeof target !== "string" || !target) return false;
+  const url = new URL(target, window.location.origin);
+  if (url.protocol !== "https:" && url.protocol !== "http:") throw new FeedbackError(copy.badRedirect);
+  window.location.assign(url);
+  return true;
+}
+function finish(result, fallback) {
+  if (result.redirect !== true || !followRedirect(result.url)) showStatus(fallback);
 }
 ${script}
 </script>
@@ -219,12 +234,13 @@ verifyForm.addEventListener("submit", (event) => {
 });
 for (const button of document.querySelectorAll("[data-provider]")) {
   button.addEventListener("click", () => act(button, async () => {
-    finish(await api("/sign-in/social", {
+    const result = await api("/sign-in/social", {
       provider: button.dataset.provider,
       callbackURL: hasLegacyRequest || oauthQuery ? window.location.href : profileSignInURL,
       disableRedirect: true,
       ...oauth,
-    }), copy.socialFailed, "error");
+    });
+    if (!followRedirect(result.url)) throw new FeedbackError(copy.socialFailed);
   }));
 }
 const passkey = document.querySelector("#passkey");
