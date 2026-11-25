@@ -19,7 +19,7 @@
   ],
   "vars": {
     "ENVIRONMENT": "development",
-    "EMAIL_BACKEND": "console",
+    "EMAIL_BACKEND": "resend",
     "BETTER_AUTH_URL": "https://passport-auth.jhfnetboy.workers.dev",
     "MAIL_FROM": "4Seas Passport <no-reply@idoris.ai>"
   }

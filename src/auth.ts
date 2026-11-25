@@ -108,14 +108,19 @@ export function createAuth(env: Env, ctx: ExecutionContext) {
         disableSignUp: false,
         async sendVerificationOTP({ email, otp, type }) {
           if (type !== "sign-in" || env.EMAIL_BACKEND !== "resend" || !env.RESEND_API_KEY) return;
-          ctx.waitUntil(sendResendEmail({
-            apiKey: env.RESEND_API_KEY,
-            from: env.MAIL_FROM,
-            to: email,
-            subject: "4Seas Passport 登录验证码",
-            text: `你的登录验证码是 ${otp}，15 分钟内有效。`,
-            tag: "passport_otp",
-          }));
+          const apiKey = env.RESEND_API_KEY;
+          const from = env.MAIL_FROM;
+          ctx.waitUntil((async () => {
+            const result = await sendResendEmail({
+              apiKey,
+              from,
+              to: email,
+              subject: "4Seas Passport 登录验证码",
+              text: `你的登录验证码是 ${otp}，15 分钟内有效。`,
+              tag: "passport_otp",
+            });
+            if (!result.ok) console.error("passport mail failed", result.error);
+          })());
         },
       }),
       passkey({ rpID: url.hostname, origin: url.origin, rpName: "4Seas Passport" }),

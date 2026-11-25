@@ -4,7 +4,7 @@ import {
   verifyOAuthQueryParams,
 } from "@better-auth/oauth-provider";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { AUTH_PATH, createAuth, normalizeEmail, SEND_OTP, SIGN_IN_OTP, socialProviders, type Env } from "./auth.ts";
+import { AUTH_PATH, createAuth, normalizeEmail, SEND_OTP, SIGN_IN_OTP, type Env } from "./auth.ts";
 import { consentPage, signInPage } from "./pages.ts";
 import { checkRedirect, client_secret_ok, PolicyError } from "./policy/clients.ts";
 import { authorizeGate, ensureLink, snapshot, type AppLink } from "./policy/links.ts";
@@ -13,7 +13,7 @@ type Auth = ReturnType<typeof createAuth>;
 type PassportUser = Parameters<typeof snapshot>[0];
 
 const error = (status: number, code: string) =>
-  Response.json({ error: code }, { status, headers: { "Cache-Control": "no-store" } });
+  Response.json({ error: { code }, code }, { status, headers: { "Cache-Control": "no-store" } });
 
 function stripPassport(request: Request): Request {
   const url = new URL(request.url);
@@ -79,7 +79,11 @@ async function passcode(auth: Auth, request: Request, body: Record<string, unkno
     return error(500, "internal_error");
   }
   return Response.json(
-    { sub: result.user.id, email: result.user.email },
+    {
+      sub: result.user.id,
+      email: result.user.email,
+      user: { sub: result.user.id, email: result.user.email },
+    },
     { headers: { "Cache-Control": "no-store" } },
   );
 }
@@ -232,7 +236,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
     if (path === "/.well-known/openid-configuration" || path === AUTH_PATH + "/.well-known/openid-configuration") {
       return oauthProviderOpenIdConfigMetadata(createAuth(env, ctx))(request);
     }
-    if (path === "/sign-in" || path === "/consent") {
+    if (path === "/sign-in" || path === "/login" || path === "/consent") {
       const auth = createAuth(env, ctx);
       const query = url.searchParams.toString();
       const signed = url.searchParams.has("sig");
@@ -240,7 +244,13 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
           !(await verifyOAuthQueryParams(query, (await auth.$context).secret))) {
         return error(400, "invalid_oauth_query");
       }
-      if (path === "/sign-in") return signInPage(signed ? query : "", socialProviders(env));
+      if (path === "/sign-in" || path === "/login") {
+        return signInPage(signed ? query : "", {
+          clientId: url.searchParams.get("client_id") ?? "",
+          redirectUri: url.searchParams.get("redirect_uri") ?? "",
+          state: url.searchParams.get("state") ?? "",
+        });
+      }
       const session = await auth.api.getSession({ headers: request.headers });
       if (!session) return error(401, "unauthorized");
       return consentPage(query, url.searchParams.get("client_id") ?? "", url.searchParams.get("scope") ?? "");
