@@ -4,10 +4,11 @@ import {
   verifyOAuthQueryParams,
 } from "@better-auth/oauth-provider";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { AUTH_PATH, createAuth, normalizeEmail, SEND_OTP, SIGN_IN_OTP, type Env } from "./auth.ts";
+import { AUTH_PATH, authHandlerPath, authRouteBase, createAuth, normalizeEmail, SEND_OTP, SIGN_IN_OTP, type Env } from "./auth.ts";
 import { consentPage, signInPage } from "./pages.ts";
 import { checkRedirect, client_secret_ok, PolicyError } from "./policy/clients.ts";
-import { authorizeGate, ensureLink, snapshot, type AppLink } from "./policy/links.ts";
+import { authorizeGate, ensureLink, hasColiving, snapshot, type AppLink } from "./policy/links.ts";
+import { provisionColivingMember } from "./policy/provision.ts";
 
 type Auth = ReturnType<typeof createAuth>;
 type PassportUser = Parameters<typeof snapshot>[0];
@@ -43,9 +44,9 @@ async function jsonObject(request: Request) {
   return isObject(value) ? value : null;
 }
 
-function otpRequest(auth: Auth, request: Request, endpoint: string, body: object) {
+function otpRequest(auth: Auth, request: Request, issuer: string, endpoint: string, body: object) {
   const url = new URL(request.url);
-  url.pathname = AUTH_PATH + endpoint;
+  url.pathname = authRouteBase(issuer).basePath + endpoint;
   url.search = "";
   const headers = new Headers({ "Content-Type": "application/json", Accept: "application/json" });
   for (const name of ["cf-connecting-ip", "origin", "referer", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"]) {
@@ -55,12 +56,12 @@ function otpRequest(auth: Auth, request: Request, endpoint: string, body: object
   return auth.handler(new Request(url, { method: "POST", headers, body: JSON.stringify(body) }));
 }
 
-async function passcode(auth: Auth, request: Request, body: Record<string, unknown>, send: boolean) {
+async function passcode(auth: Auth, request: Request, issuer: string, body: Record<string, unknown>, send: boolean) {
   const email = normalizeEmail(body.email);
   if (!email) return error(400, "invalid_email");
 
   if (send) {
-    const response = await otpRequest(auth, request, SEND_OTP, { email, type: "sign-in" });
+    const response = await otpRequest(auth, request, issuer, SEND_OTP, { email, type: "sign-in" });
     if (response.status === 429) return error(429, "cooldown");
     if (response.ok) return new Response(null, { status: 202, headers: { "Cache-Control": "no-store" } });
     return error(response.status, response.status === 400 ? "invalid_email" : "request_failed");
@@ -68,7 +69,7 @@ async function passcode(auth: Auth, request: Request, body: Record<string, unkno
 
   const code = typeof body.code === "string" ? body.code.trim() : "";
   if (!/^\d{6}$/.test(code)) return error(401, "invalid_code");
-  const response = await otpRequest(auth, request, SIGN_IN_OTP, { email, otp: code });
+  const response = await otpRequest(auth, request, issuer, SIGN_IN_OTP, { email, otp: code });
   if (response.status === 429) return error(429, "rate_limited");
   if (response.status >= 500) return error(500, "internal_error");
   if (!response.ok) return error(401, "invalid_code");
@@ -162,7 +163,21 @@ async function authorize(auth: Auth, env: Env, request: Request, body: Record<st
   checkRedirect(clientId, redirectUri);
 
   const sub = session.user.id;
-  authorizeGate(clientId, await appLinks(env.DB, sub));
+  let links = await appLinks(env.DB, sub);
+  // 食堂新用户没有 CoLiving 关联时，先记一条联系人（不是住房申请，也不是 owner），再放行。
+  if (clientId === "canteen" && !hasColiving(links) && session.user.emailVerified) {
+    const created = await provisionColivingMember(fetch, {
+      serviceKey: env.LINK_SERVICE_KEY ?? "",
+      email: session.user.email,
+      name: session.user.name || null,
+      sub,
+    }).catch(() => null);
+    if (created) {
+      await ensureLink(env.DB, { sub, app: "coliving", externalId: created.externalId });
+      links = await appLinks(env.DB, sub);
+    }
+  }
+  authorizeGate(clientId, links);
   const code = randomBytes(32).toString("hex");
   const now = Date.now();
   await env.DB.prepare(`
@@ -221,6 +236,22 @@ async function exchange(env: Env, body: Record<string, unknown>) {
 }
 
 async function handle(request: Request, env: Env, ctx: ExecutionContext) {
+  if (request.method === "GET" || request.method === "HEAD") {
+    const raw = new URL(request.url);
+    if (raw.pathname === "/passport" || raw.pathname === "/passport/") {
+      raw.pathname = "/passport/login";
+      return Response.redirect(raw.toString(), 302);
+    }
+  }
+  const handlerPath = authHandlerPath(new URL(request.url).pathname, env.BETTER_AUTH_URL);
+  if (handlerPath) {
+    const authUrl = new URL(request.url);
+    if (authUrl.pathname !== handlerPath) {
+      authUrl.pathname = handlerPath;
+      request = new Request(authUrl, request);
+    }
+    return createAuth(env, ctx).handler(request);
+  }
   request = stripPassport(request);
   const url = new URL(request.url);
   const path = url.pathname;
@@ -256,8 +287,6 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
       return consentPage(query, url.searchParams.get("client_id") ?? "", url.searchParams.get("scope") ?? "");
     }
   }
-  if (path.startsWith(AUTH_PATH + "/")) return createAuth(env, ctx).handler(request);
-
   if (request.method === "POST") {
     switch (path) {
       case "/v1/auth/passcode/request":
@@ -274,7 +303,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
         if (path === "/v1/connect/token") return exchange(env, body);
         const auth = createAuth(env, ctx);
         if (path === "/v1/connect/authorize") return authorize(auth, env, request, body);
-        return passcode(auth, request, body, path === "/v1/auth/passcode/request");
+        return passcode(auth, request, env.BETTER_AUTH_URL, body, path === "/v1/auth/passcode/request");
       }
     }
   }

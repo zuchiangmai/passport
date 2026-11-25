@@ -10,6 +10,29 @@ export const AUTH_PATH = "/api/auth";
 export const SEND_OTP = "/email-otp/send-verification-otp";
 export const SIGN_IN_OTP = "/sign-in/email-otp";
 
+// Better Auth ignores basePath when baseURL already contains a path. The public
+// issuer is https://4seas.xyz/passport, so the auth router must be told that
+// its mount is /passport/api/auth and its baseURL is only the origin.
+export function authRouteBase(issuer: string): { baseURL: string; basePath: string } {
+  const url = new URL(issuer);
+  const mount = url.pathname.replace(/\/+$/, "");
+  return {
+    baseURL: url.origin,
+    basePath: `${mount === "/" ? "" : mount}${AUTH_PATH}`,
+  };
+}
+
+// Returns the pathname the Better Auth router must see, or null when this
+// request is one of our own routes. Accepts both /passport/api/auth/* and
+// /api/auth/* so a proxy that already stripped the mount still matches.
+export function authHandlerPath(pathname: string, issuer: string): string | null {
+  const stripped = pathname === "/passport" || pathname.startsWith("/passport/")
+    ? pathname.slice("/passport".length) || "/"
+    : pathname;
+  if (stripped !== AUTH_PATH && !stripped.startsWith(`${AUTH_PATH}/`)) return null;
+  return `${authRouteBase(issuer).basePath}${stripped.slice(AUTH_PATH.length)}`;
+}
+
 export interface Env {
   DB: D1Database;
   ENVIRONMENT: string;
@@ -36,7 +59,7 @@ export function normalizeEmail(value: unknown): string | null {
 function provider(id?: string, secret?: string) {
   const clientId = id?.trim();
   const clientSecret = secret?.trim();
-  return clientId && clientSecret ? { clientId, clientSecret } : undefined;
+  return clientId && clientSecret ? { clientId, clientSecret, requireEmailVerification: true } : undefined;
 }
 
 export function socialProviders(env: Env) {
@@ -68,11 +91,13 @@ async function reserveOtpSend(db: D1Database, email: string) {
 export function createAuth(env: Env, ctx: ExecutionContext) {
   if (!env.BETTER_AUTH_SECRET?.trim()) throw new Error("BETTER_AUTH_SECRET is required");
   const url = new URL(env.BETTER_AUTH_URL);
+  const routes = authRouteBase(env.BETTER_AUTH_URL);
+  const issuer = env.BETTER_AUTH_URL.replace(/\/+$/, "");
   return betterAuth({
     database: env.DB,
     secret: env.BETTER_AUTH_SECRET,
-    baseURL: env.BETTER_AUTH_URL,
-    basePath: AUTH_PATH,
+    baseURL: routes.baseURL,
+    basePath: routes.basePath,
     logger: { disabled: true },
     advanced: {
       ipAddress: { ipAddressHeaders: ["cf-connecting-ip"] },
@@ -94,7 +119,7 @@ export function createAuth(env: Env, ctx: ExecutionContext) {
       }),
     },
     plugins: [
-      jwt({ disableSettingJwtHeader: true }),
+      jwt({ disableSettingJwtHeader: true, jwt: { issuer, audience: issuer } }),
       oauthProvider({
         loginPage: "/sign-in",
         consentPage: "/consent",

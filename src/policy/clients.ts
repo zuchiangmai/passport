@@ -28,10 +28,7 @@ const clients: Record<ClientId, Client> = {
   },
   canteen: {
     secret: "canteenSecret",
-    redirects: [
-      "https://4seas.xyz/canteen/auth/callback",
-      "https://healthyliving-admin.jhfnetboy.workers.dev/auth/callback",
-    ],
+    redirects: ["https://4seas.xyz/canteen/auth/callback"],
   },
 };
 

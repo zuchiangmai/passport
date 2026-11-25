@@ -29,7 +29,14 @@ test("allows canteen authorization and linking with CoLiving for the same sub", 
 test("accepts only exact redirects registered to a known client", () => {
   assert.doesNotThrow(() => checkRedirect("coliving", "https://4seas.xyz/coliving/auth/callback"));
   assert.doesNotThrow(() => checkRedirect("canteen", "https://4seas.xyz/canteen/auth/callback"));
-  assert.doesNotThrow(() => checkRedirect("canteen", "https://healthyliving-admin.jhfnetboy.workers.dev/auth/callback"));
+  assert.throws(() => checkRedirect("canteen", "https://healthyliving-admin.jhfnetboy.workers.dev/auth/callback"), {
+    code: "forbidden",
+    message: "redirect_uri is not registered",
+  });
+  assert.throws(() => checkRedirect("canteen", "https://healthyliving-admin.jhfnetboy.workers.dev/canteen/auth/callback"), {
+    code: "forbidden",
+    message: "redirect_uri is not registered",
+  });
   assert.throws(() => checkRedirect("canteen", "https://4seas.xyz/canteen/auth/callback/"), {
     code: "forbidden",
     message: "redirect_uri is not registered",

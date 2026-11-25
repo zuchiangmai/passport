@@ -18,7 +18,7 @@ Community Account System, open source.
 | --- | --- |
 | 浏览器 | 打开 `/passport/login?client_id&redirect_uri&state`，邮箱验证码、Google 或 GitHub |
 | CoLiving | 服务密钥 `identity:write` 把已验证邮箱和自己的外部 id 绑到 `sub`；用 `client_id=coliving` 换 token |
-| 食堂 | 只接受 `client_id=canteen` 的授权码。回调只允许 `https://4seas.xyz/canteen/auth/callback` 和当前的 workers.dev 回调 |
+| 食堂 | 只接受 `client_id=canteen` 的授权码。回调只允许 `https://4seas.xyz/canteen/auth/callback` |
 
 原有的邮箱 magic link、Telegram、积分、签到、webhook 都还在 `/v1/...`，同一套路由也挂在 `/passport/v1/...`。
 
