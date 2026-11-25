@@ -1,0 +1,21 @@
+{
+  "name": "passport-auth",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:local": "node scripts/test-local.mjs"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "dependencies": {
+    "@better-auth/oauth-provider": "1.7.28",
+    "@better-auth/passkey": "1.7.28",
+    "better-auth": "1.7.28"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.0.0"
+  }
+}
