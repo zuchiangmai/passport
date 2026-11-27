@@ -1,144 +1,119 @@
+import { tryGetCurrentAuthEndpointContext } from "@better-auth/core/context";
 import type { BetterAuthPlugin } from "better-auth";
-import { APIError, createAuthEndpoint, getSessionFromCtx } from "better-auth/api";
-import { isLikelyBot, normalizeEmail, type QuizGate } from "../../packages/quiz-gate/src/index.ts";
+import { getOAuthProviderState } from "@better-auth/oauth-provider";
+import { APIError, createAuthEndpoint, getOAuthState, sessionMiddleware } from "better-auth/api";
+import { isLikelyBot, type QuizGate } from "../../packages/quiz-gate/src/index.ts";
 import { passportLanguage, preferredLanguage } from "../locale.ts";
 
 /**
- * off     the quiz endpoints 404 and sign-up works as before.
- * on      a new account by email code needs a quiz pass for that email. Google and GitHub
- *         sign-up keep working (CoLiving, canteen) and record quizPassedAt only with a pass.
- * strict  a new account by any method, Google and GitHub included, needs a quiz pass.
+ * Master switch. `off` (default): the plugin is not registered, no quiz table is read or
+ * written, and Passport behaves exactly like main. `on`: clients in QUIZ_CLIENTS require
+ * a passed quiz before they get an authorization code. Every other client is unaffected.
  */
-export type QuizMode = "off" | "on" | "strict";
+export type QuizMode = "off" | "on";
 
 export function quizMode(value: string | undefined): QuizMode {
-  const mode = value?.trim().toLowerCase();
-  return mode === "on" || mode === "strict" ? mode : "off";
+  return value?.trim().toLowerCase() === "on" ? "on" : "off";
 }
 
-export const QUIZ_PASS_COOKIE = "passport_quiz_pass";
-export const QUIZ_PASS_HEADER = "x-quiz-pass";
+/** QUIZ_CLIENTS=topic-research,other-site */
+export function quizClients(value: string | undefined): Set<string> {
+  return new Set((value ?? "").split(",").map((id) => id.trim()).filter(Boolean));
+}
 
-type HeaderContext = {
-  headers?: Headers;
-  request?: Request;
-  getCookie: (key: string) => string | null | undefined;
-};
+export type QuizRecord = { registrationMethod: string; quizPassedAt: number; score: number; total: number };
+
+export async function quizRecord(db: D1Database, userId: string): Promise<QuizRecord | null> {
+  const row = await db.prepare(
+    "SELECT registration_method, quiz_passed_at, score, total FROM quiz_registration WHERE user_id = ?1",
+  ).bind(userId).first<{ registration_method: string; quiz_passed_at: number; score: number; total: number }>();
+  return row && { registrationMethod: row.registration_method, quizPassedAt: row.quiz_passed_at, score: row.score, total: row.total };
+}
+
+/** How the account was created: its first linked provider, otherwise email. */
+async function registrationMethod(db: D1Database, userId: string): Promise<string> {
+  const provider = await db.prepare(
+    'SELECT "providerId" AS provider FROM "account" WHERE "userId" = ?1 ORDER BY "createdAt" ASC LIMIT 1',
+  ).bind(userId).first<string>("provider");
+  return provider ?? "email";
+}
 
 function header(ctx: { headers?: Headers; request?: Request }, name: string) {
   return ctx.headers?.get(name) ?? ctx.request?.headers.get(name) ?? null;
-}
-
-function passToken(ctx: HeaderContext): string | undefined {
-  return header(ctx, QUIZ_PASS_HEADER) ?? ctx.getCookie(QUIZ_PASS_COOKIE) ?? undefined;
 }
 
 function language(ctx: { headers?: Headers; request?: Request }) {
   return passportLanguage(header(ctx, "x-passport-language")) ?? preferredLanguage(header(ctx, "accept-language"));
 }
 
-const quizRequired = () => new APIError("FORBIDDEN", {
-  code: "QUIZ_REQUIRED",
-  message: "Pass the registration quiz with this email first",
-});
+function clientIdIn(query: unknown): string | null {
+  if (typeof query !== "string" || !query) return null;
+  return new URLSearchParams(query).get("client_id") || null;
+}
 
 /**
- * Runs before a sign-in code is sent. An unknown email gets no code, and no mail is sent,
- * until it holds an unexpired pass. Call this before any cooldown is reserved.
+ * client_id of the authorization request being processed: the authorize query, a signed
+ * oauth_query in the body (email code and passkey sign-in, /oauth2/continue), or the
+ * request state oauthProvider keeps across a Google or GitHub callback.
  */
-export async function guardSignInCode(
-  ctx: HeaderContext & { context: { internalAdapter: { findUserByEmail(email: string): Promise<unknown> } } },
-  gate: QuizGate,
-  mode: QuizMode,
-  email: string,
-) {
-  if (mode === "off") return;
-  if (await ctx.context.internalAdapter.findUserByEmail(email)) return;
-  if (await gate.checkPass(passToken(ctx), email)) return;
-  throw quizRequired();
+export async function currentClientId(): Promise<string | null> {
+  const ctx = tryGetCurrentAuthEndpointContext() as { query?: Record<string, unknown>; body?: Record<string, unknown> } | undefined;
+  const fromQuery = ctx?.query?.client_id;
+  if (typeof fromQuery === "string" && fromQuery) return fromQuery;
+  const fromBody = clientIdIn(ctx?.body?.oauth_query);
+  if (fromBody) return fromBody;
+  const providerState = await Promise.resolve().then(() => getOAuthProviderState()).catch(() => null);
+  const fromProvider = clientIdIn(providerState?.query);
+  if (fromProvider) return fromProvider;
+  const socialState = await Promise.resolve().then(() => getOAuthState()).catch(() => null);
+  return clientIdIn((socialState as { serverContext?: { query?: unknown } } | null)?.serverContext?.query);
 }
 
-/** The sign-up route as a short method name stored on the user. */
-export function registrationMethod(ctx: { path?: string; params?: Record<string, string | undefined> } | null | undefined): string {
-  const path = ctx?.path ?? "";
-  if (path.startsWith("/callback/")) return ctx?.params?.id || path.split("/").pop() || "social";
-  if (path === "/sign-in/email-otp") return "email-otp";
-  if (path.startsWith("/oauth2/callback/")) return ctx?.params?.providerId || "oauth2";
-  return path ? path.replace(/^\//, "") : "server";
-}
-
-export function quizRegistration(options: { gate: QuizGate; mode: QuizMode; secureCookie: boolean }) {
-  const { gate, mode } = options;
-
-  const enabled = () => {
-    if (mode === "off") throw new APIError("NOT_FOUND", { code: "NOT_FOUND", message: "Not found" });
+/**
+ * The oauthProvider `postLogin` option. After sign-in (by any method) and before a code is
+ * issued, a quiz client sends users without a recorded pass to the quiz page. Other clients
+ * never redirect. The check reads the database again on continuation, so skipping the page
+ * does not help.
+ */
+export function quizPostLogin(options: { db: D1Database; clients: Set<string>; page: string }) {
+  return {
+    page: options.page,
+    consentReferenceId: () => undefined,
+    async shouldRedirect({ user }: { user: { id: string } }) {
+      const clientId = await currentClientId();
+      // If a quiz client is configured but the client cannot be identified, fail closed.
+      if (clientId === null) return options.clients.size > 0 && !(await quizRecord(options.db, user.id));
+      if (!options.clients.has(clientId)) return false;
+      return !(await quizRecord(options.db, user.id));
+    },
   };
+}
+
+/** Quiz endpoints for the signed-in user. Registered only when QUIZ_REGISTRATION=on. */
+export function quizRegistration(options: { gate: QuizGate; db: D1Database }) {
+  const { gate, db } = options;
   const notBot = (ctx: { headers?: Headers; request?: Request }) => {
     if (isLikelyBot(header(ctx, "user-agent"))) throw new APIError("FORBIDDEN", { code: "BOT", message: "Forbidden" });
-  };
-  const bodyEmail = (body: unknown) => {
-    const email = normalizeEmail((body as Record<string, unknown> | undefined)?.email);
-    if (!email) throw new APIError("BAD_REQUEST", { code: "INVALID_EMAIL", message: "Invalid email" });
-    return email;
   };
 
   return {
     id: "quiz-registration",
-    schema: {
-      user: {
-        fields: {
-          registrationMethod: { type: "string", required: false, input: false },
-          quizPassedAt: { type: "date", required: false, input: false },
-        },
-      },
-    },
     rateLimit: [{ pathMatcher: (path: string) => path.startsWith("/quiz/"), window: 60, max: 10 }],
-    init() {
-      return {
-        options: {
-          databaseHooks: {
-            user: {
-              create: {
-                async before(user, context) {
-                  const method = registrationMethod(context);
-                  const data: Record<string, unknown> = { ...user, registrationMethod: method };
-                  if (!context || mode === "off") return { data };
-                  const social = method !== "email-otp" && (context.path?.startsWith("/callback/") || context.path?.startsWith("/oauth2/callback/"));
-                  const gated = method === "email-otp" || (mode === "strict" && social);
-                  const token = passToken(context);
-                  // Consume even when not required, so a Google sign-up right after a pass is recorded.
-                  const passed = (gated || token) ? await gate.consumePass(token, user.email) : false;
-                  if (gated && !passed) throw quizRequired();
-                  if (passed) {
-                    context.setCookie(QUIZ_PASS_COOKIE, "", { maxAge: 0, path: "/", httpOnly: true, secure: options.secureCookie, sameSite: "lax" });
-                    data.registrationMethod = method === "email-otp" ? "quiz" : `quiz+${method}`;
-                    data.quizPassedAt = new Date();
-                  }
-                  return { data: data as typeof user };
-                },
-              },
-            },
-          },
-        },
-      };
-    },
     endpoints: {
-      quizStart: createAuthEndpoint("/quiz/start", { method: "POST" }, async (ctx) => {
-        enabled();
+      quizStatus: createAuthEndpoint("/quiz/status", { method: "GET", use: [sessionMiddleware] }, async (ctx) => {
+        const record = await quizRecord(db, ctx.context.session.user.id);
+        return ctx.json({ passed: Boolean(record), ...(record ?? {}) });
+      }),
+      quizStart: createAuthEndpoint("/quiz/start", { method: "POST", use: [sessionMiddleware] }, async (ctx) => {
         notBot(ctx);
-        const email = bodyEmail(ctx.body);
-        const session = await getSessionFromCtx(ctx).catch(() => null);
-        const existing = await ctx.context.internalAdapter.findUserByEmail(email);
-        // Existing accounts just sign in. A signed-in user may take the quiz for their own email.
-        const self = Boolean(session && existing && session.user.id === existing.user.id);
-        if (existing && !self) return ctx.json({ status: "existing" });
+        const { user } = ctx.context.session;
+        if (await quizRecord(db, user.id)) return ctx.json({ status: "passed" });
         const ip = header(ctx, "cf-connecting-ip") ?? header(ctx, "x-forwarded-for")?.split(",")[0].trim() ?? null;
-        const result = await gate.start({ email, ip, language: language(ctx) });
+        const result = await gate.start({ email: user.email, ip, language: language(ctx) });
         if (!result.ok) {
-          if (result.error === "bank_empty") {
+          if (result.error === "bank_empty" || result.error === "invalid_email") {
             throw new APIError("SERVICE_UNAVAILABLE", { code: "QUIZ_UNAVAILABLE", message: "The quiz is not available" });
           }
-          if (result.error === "invalid_email") throw new APIError("BAD_REQUEST", { code: "INVALID_EMAIL", message: "Invalid email" });
           throw new APIError("TOO_MANY_REQUESTS", {
             code: result.error === "cooldown" ? "QUIZ_COOLDOWN" : "QUIZ_LIMIT",
             message: result.error === "cooldown" ? "Retry the quiz later" : "Too many quiz attempts today",
@@ -153,30 +128,22 @@ export function quizRegistration(options: { gate: QuizGate; mode: QuizMode; secu
           questions: result.questions,
         });
       }),
-      quizSubmit: createAuthEndpoint("/quiz/submit", { method: "POST" }, async (ctx) => {
-        enabled();
+      quizSubmit: createAuthEndpoint("/quiz/submit", { method: "POST", use: [sessionMiddleware] }, async (ctx) => {
         notBot(ctx);
-        const email = bodyEmail(ctx.body);
-        const body = ctx.body as Record<string, unknown>;
-        const result = await gate.submit({ email, attemptId: body.attemptId, answers: body.answers, language: language(ctx) });
+        const { user } = ctx.context.session;
+        const body = (ctx.body ?? {}) as Record<string, unknown>;
+        const result = await gate.submit({ email: user.email, attemptId: body.attemptId, answers: body.answers, language: language(ctx) });
         if (!result.ok) {
           throw new APIError("GONE", { code: "QUIZ_ATTEMPT_INVALID", message: "This quiz expired or was already submitted" });
         }
         let recorded = false;
-        if (result.pass) {
-          const session = await getSessionFromCtx(ctx).catch(() => null);
-          if (session && session.user.email.toLowerCase() === email && await gate.consumePass(result.pass.token, email)) {
-            await ctx.context.internalAdapter.updateUser(session.user.id, { quizPassedAt: new Date() });
-            recorded = true;
-          } else {
-            ctx.setCookie(QUIZ_PASS_COOKIE, result.pass.token, {
-              maxAge: Math.floor((result.pass.expiresAt - Date.now()) / 1000),
-              path: "/",
-              httpOnly: true,
-              secure: options.secureCookie,
-              sameSite: "lax",
-            });
-          }
+        if (result.pass && await gate.consumePass(result.pass.token, user.email)) {
+          await db.prepare(`
+            INSERT INTO quiz_registration (user_id, registration_method, quiz_passed_at, score, total)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(user_id) DO NOTHING
+          `).bind(user.id, await registrationMethod(db, user.id), Date.now(), result.score, result.total).run();
+          recorded = true;
         }
         return ctx.json({
           passed: result.passed,
@@ -186,8 +153,6 @@ export function quizRegistration(options: { gate: QuizGate; mode: QuizMode; secu
           review: result.review,
           retryAt: result.retryAt,
           recorded,
-          // Also returned for clients without cookies. Send it back as the X-Quiz-Pass header.
-          pass: result.pass && !recorded ? result.pass : undefined,
         });
       }),
     },

@@ -24,8 +24,7 @@ curl -i "$BASE/v1/auth/passcode/verify" -H 'Content-Type: application/json' -d '
 curl -i "$BASE/v1/identity/links" -H 'Content-Type: application/json' -d '{}'
 curl -i "$BASE/v1/connect/token" -H 'Content-Type: application/json' -d '{}'
 
-# With QUIZ_REGISTRATION=on and a seeded bank: an unknown email gets 403 QUIZ_REQUIRED and no mail,
-# and the quiz starts with three questions and no answers.
-curl -i "$BASE/passport/api/auth/email-otp/send-verification-otp" -H "Origin: $BASE" -H 'Content-Type: application/json' -d '{"email":"quiz-smoke@example.test","type":"sign-in"}'
-curl -sS "$BASE/passport/api/auth/quiz/start" -H "Origin: $BASE" -H 'User-Agent: Mozilla/5.0 smoke' -H 'Content-Type: application/json' -d '{"email":"quiz-smoke@example.test"}'
+# The quiz page and endpoints do not exist unless QUIZ_REGISTRATION=on (404).
+# With it on they need a session, so an anonymous request returns 401.
+curl -i "$BASE/passport/api/auth/quiz/status"
 `);

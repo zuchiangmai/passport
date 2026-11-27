@@ -6,8 +6,8 @@ import {
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { AUTH_PATH, authHandlerPath, authRouteBase, createAuth, normalizeEmail, SEND_OTP, SIGN_IN_OTP, type Env } from "./auth.ts";
 import { passportLanguage, preferredLanguage } from "./locale.ts";
-import { consentPage, signInPage } from "./pages.ts";
-import { QUIZ_PASS_HEADER, quizMode } from "./quiz/plugin.ts";
+import { consentPage, quizPage, signInPage } from "./pages.ts";
+import { quizMode } from "./quiz/plugin.ts";
 import { checkRedirect, client_secret_ok, PolicyError } from "./policy/clients.ts";
 import { authorizeGate, ensureLink, hasColiving, snapshot, type AppLink } from "./policy/links.ts";
 import { provisionColivingMember } from "./policy/provision.ts";
@@ -46,7 +46,7 @@ async function jsonObject(request: Request) {
   return isObject(value) ? value : null;
 }
 
-function otpRequest(auth: Auth, request: Request, issuer: string, endpoint: string, body: object, quizPass?: unknown) {
+function otpRequest(auth: Auth, request: Request, issuer: string, endpoint: string, body: object) {
   const url = new URL(request.url);
   url.pathname = authRouteBase(issuer).basePath + endpoint;
   url.search = "";
@@ -55,9 +55,6 @@ function otpRequest(auth: Auth, request: Request, issuer: string, endpoint: stri
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
-  // Clients without cookies pass the quiz token in the body or the X-Quiz-Pass header.
-  const pass = typeof quizPass === "string" ? quizPass : request.headers.get(QUIZ_PASS_HEADER);
-  if (pass) headers.set(QUIZ_PASS_HEADER, pass);
   return auth.handler(new Request(url, { method: "POST", headers, body: JSON.stringify(body) }));
 }
 
@@ -66,18 +63,16 @@ async function passcode(auth: Auth, request: Request, issuer: string, body: Reco
   if (!email) return error(400, "invalid_email");
 
   if (send) {
-    const response = await otpRequest(auth, request, issuer, SEND_OTP, { email, type: "sign-in" }, body.quiz_pass);
+    const response = await otpRequest(auth, request, issuer, SEND_OTP, { email, type: "sign-in" });
     if (response.status === 429) return error(429, "cooldown");
-    if (response.status === 403) return error(403, "quiz_required");
     if (response.ok) return new Response(null, { status: 202, headers: { "Cache-Control": "no-store" } });
     return error(response.status, response.status === 400 ? "invalid_email" : "request_failed");
   }
 
   const code = typeof body.code === "string" ? body.code.trim() : "";
   if (!/^\d{6}$/.test(code)) return error(401, "invalid_code");
-  const response = await otpRequest(auth, request, issuer, SIGN_IN_OTP, { email, otp: code }, body.quiz_pass);
+  const response = await otpRequest(auth, request, issuer, SIGN_IN_OTP, { email, otp: code });
   if (response.status === 429) return error(429, "rate_limited");
-  if (response.status === 403) return error(403, "quiz_required");
   if (response.status >= 500) return error(500, "internal_error");
   if (!response.ok) return error(401, "invalid_code");
 
@@ -130,8 +125,8 @@ async function linkIdentity(db: D1Database, body: Record<string, unknown>) {
     const now = new Date().toISOString();
     // An existing external ID may not provision a second user.
     await db.prepare(`
-      INSERT INTO user (id, email, emailVerified, name, createdAt, updatedAt, registrationMethod)
-      SELECT ?1, ?2, 0, ?3, ?4, ?4, 'link:' || ?5
+      INSERT INTO user (id, email, emailVerified, name, createdAt, updatedAt)
+      SELECT ?1, ?2, 0, ?3, ?4, ?4
       WHERE NOT EXISTS (SELECT 1 FROM app_link WHERE app = ?5 AND external_id = ?6)
       ON CONFLICT(email) DO NOTHING
     `).bind(crypto.randomUUID(), email, name?.trim() ?? "", now, app, externalId.trim()).run();
@@ -271,9 +266,10 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
     if (path === "/.well-known/openid-configuration" || path === AUTH_PATH + "/.well-known/openid-configuration") {
       return oauthProviderOpenIdConfigMetadata(createAuth(env, ctx))(request);
     }
-    const pageRoute = /^\/(?:(en|zh|th)\/)?(sign-in|login|consent)\/?$/.exec(path);
+    const pageRoute = /^\/(?:(en|zh|th)\/)?(sign-in|login|consent|quiz)\/?$/.exec(path);
     if (pageRoute) {
       const [, locale, route] = pageRoute;
+      if (route === "quiz" && quizMode(env.QUIZ_REGISTRATION) !== "on") return error(404, "not_found");
       const location = {
         language: passportLanguage(locale) ?? preferredLanguage(request.headers.get("accept-language")),
         prefix: incoming.pathname.startsWith("/passport/") ? "/passport" : "",
@@ -283,22 +279,20 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
       const auth = createAuth(env, ctx);
       const query = url.searchParams.toString();
       const signed = url.searchParams.has("sig");
-      if ((signed || route === "consent") &&
+      if ((signed || route === "consent" || route === "quiz") &&
           !(await verifyOAuthQueryParams(query, (await auth.$context).secret))) {
         return error(400, "invalid_oauth_query");
       }
-      if (route !== "consent") {
+      if (route !== "consent" && route !== "quiz") {
         return signInPage(location, signed ? query : "", {
           clientId: url.searchParams.get("client_id") ?? "",
           redirectUri: url.searchParams.get("redirect_uri") ?? "",
           state: url.searchParams.get("state") ?? "",
-        }, {
-          quiz: quizMode(env.QUIZ_REGISTRATION) !== "off",
-          learnBase: env.QUIZ_LEARN_BASE_URL,
         });
       }
       const session = await auth.api.getSession({ headers: request.headers });
       if (!session) return error(401, "unauthorized");
+      if (route === "quiz") return quizPage(location, query, env.QUIZ_LEARN_BASE_URL);
       return consentPage(location, query, url.searchParams.get("client_id") ?? "", url.searchParams.get("scope") ?? "");
     }
   }

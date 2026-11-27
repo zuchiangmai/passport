@@ -8,7 +8,9 @@ GOOGLE_CLIENT_SECRET=
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 LINK_SERVICE_KEY=
+# Quiz gate: off unless exactly "on"; QUIZ_CLIENTS lists the gated OAuth client IDs.
 QUIZ_REGISTRATION=off
+QUIZ_CLIENTS=
 QUIZ_LEARN_BASE_URL=
 # Local only: capture mail on a loopback server instead of Resend.
 RESEND_API_URL=

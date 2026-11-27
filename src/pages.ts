@@ -2,6 +2,7 @@ import { LANGUAGES, renderFooter, renderHeader, VERSION } from "@4seas/site-chro
 import { escapeHtml } from "./html.ts";
 import type { Language } from "./locale.ts";
 import { pageCopy } from "./page-copy.ts";
+import { quizCopy } from "./quiz/copy.ts";
 
 const assetBase = "/passport/site-chrome";
 
@@ -12,7 +13,7 @@ type PageLocation = {
   search: string;
 };
 
-function page(location: PageLocation, title: string, query: string, content: string, script: string, attrs = "", subtitle = "") {
+function page(location: PageLocation, title: string, query: string, content: string, script: string, attrs = "", subtitle = "", style = "") {
   const nonce = crypto.randomUUID();
   const { language, prefix, route, search } = location;
   const languages = LANGUAGES.map(({ code, label }) => ({
@@ -54,22 +55,7 @@ function page(location: PageLocation, title: string, query: string, content: str
   .or{display:flex;align-items:center;gap:12px;margin:0 0 12px;color:var(--muted);font-size:12px}
   .or::before,.or::after{content:"";flex:1;height:1px;background:var(--line)}
   dd{margin:0 0 .7rem;overflow-wrap:anywhere}
-  .quiz{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
-  .quiz h2{font-size:18px;margin:0 0 6px}
-  .quiz-note{margin:0 0 12px;color:var(--muted);font-size:14px;line-height:1.5}
-  .quiz fieldset{margin:0 0 12px;padding:12px 14px;border:1px solid var(--line);border-radius:12px}
-  .quiz legend{padding:0 4px;font-weight:600;line-height:1.5}
-  .quiz .topic{display:inline-block;margin-left:6px;padding:0 8px;border-radius:10px;background:var(--bg);color:var(--muted);font-size:12px;font-weight:500}
-  .quiz label{display:flex;gap:10px;align-items:flex-start;padding:6px 4px;cursor:pointer;line-height:1.45}
-  .quiz label input{width:auto;margin:3px 0 0;flex:none}
-  .quiz-review ol{margin:8px 0 0;padding-left:20px}
-  .quiz-review li{margin-bottom:12px}
-  .quiz-review ul{margin:4px 0;padding-left:18px}
-  .quiz-review .right{color:#087443;font-weight:600}
-  .quiz-review .wrong{color:#a32222;text-decoration:line-through}
-  .quiz-review p{margin:4px 0;font-size:14px;color:var(--muted);line-height:1.5}
-  .quiz-review a{color:#005040}
-  #status{margin:0}
+  #status{margin:0}${style}
   #status:not(:empty){margin-top:12px;padding:8px 12px;border-radius:8px;font-weight:600;color:#087443;background:#e8f7ee}
   #status[data-kind="error"]:not(:empty){color:#a32222;background:#fceaea}
   @media (min-width:700px){
@@ -161,11 +147,8 @@ export function signInPage(
   location: PageLocation,
   query: string,
   legacy: { clientId: string; redirectUri: string; state: string },
-  options: { quiz?: boolean; learnBase?: string } = {},
 ) {
   const copy = pageCopy[location.language];
-  const quiz = options.quiz === true;
-  const learnBase = options.learnBase?.trim() ? options.learnBase.trim().replace(/\/*$/, "/") : "";
   const attrs = `data-client-id="${escapeHtml(legacy.clientId)}" data-redirect-uri="${escapeHtml(legacy.redirectUri)}" data-state="${escapeHtml(legacy.state)}"`;
   return page(location, copy.signIn, query, `
 <div class="actions">
@@ -181,13 +164,7 @@ export function signInPage(
 <form id="verify-code" class="code-row">
   <input id="code" inputmode="numeric" autocomplete="one-time-code" aria-label="${copy.code}" placeholder="${copy.code}" pattern="[0-9]{6}" maxlength="6" required>
   <button type="submit">${copy.confirm}</button>
-</form>${quiz ? `
-<section id="quiz" class="quiz" data-learn-base="${escapeHtml(learnBase)}" hidden>
-  <h2>${copy.quizTitle}</h2>
-  <p id="quiz-note" class="quiz-note"></p>
-  <form id="quiz-form"><div id="quiz-questions"></div><button type="submit">${copy.quizSubmit}</button></form>
-  <div id="quiz-review" class="quiz-review" hidden><h2>${copy.quizReview}</h2><ol id="quiz-review-list"></ol></div>
-</section>` : ""}`, `
+</form>`, `
 const mainEl = document.querySelector(".passport-card");
 const legacy = {
   clientId: mainEl.dataset.clientId || "",
@@ -237,160 +214,12 @@ if (hasLegacyRequest) {
     if (session?.user) await continueLegacy();
   }).catch((error) => showStatus(error instanceof FeedbackError ? error.message : copy.cannotReturn, "error"));
 }
-const quizEnabled = ${quiz ? "true" : "false"};
-function fill(text, values) {
-  return text.replace(/\\{(\\w+)\\}/g, (match, key) => key in values ? String(values[key]) : match);
-}
-function when(ms) {
-  return new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(ms));
-}
-async function apiRaw(path, body) {
-  const response = await fetch(prefix + "/api/auth" + path, {
-    method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json", "X-Passport-Language": language },
-    body: JSON.stringify(body),
-  });
-  return { response, payload: await response.json().catch(() => ({})) };
-}
-function quizError(response, payload) {
-  const retry = typeof payload.retryAt === "number" ? when(payload.retryAt) : "";
-  if (payload.code === "QUIZ_COOLDOWN") return new FeedbackError(fill(copy.quizCooldown, { time: retry }));
-  if (payload.code === "QUIZ_LIMIT") return new FeedbackError(fill(copy.quizLimit, { time: retry }));
-  if (payload.code === "QUIZ_ATTEMPT_INVALID") return new FeedbackError(copy.quizExpired);
-  if (payload.code === "QUIZ_UNAVAILABLE" || response.status === 404) return new FeedbackError(copy.quizUnavailable);
-  if (response.status === 429) return new FeedbackError(copy.rateLimited);
-  return new FeedbackError(copy.failed);
-}
-async function sendCode(target) {
-  const { response, payload } = await apiRaw("/email-otp/send-verification-otp", { email: target, type: "sign-in" });
-  if (response.ok) {
-    requestedEmail = target;
-    return "sent";
-  }
-  if (quizEnabled && response.status === 403 && payload.code === "QUIZ_REQUIRED") return "quiz";
-  throw quizError(response, payload);
-}
-const quizSection = document.querySelector("#quiz");
-let quizAttempt = null;
-function element(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-function safeLink(href, label) {
-  const base = quizSection.dataset.learnBase;
-  let url = null;
-  try { url = href.startsWith("/") ? (base ? new URL(href.replace(/^\\/+/, ""), base) : null) : new URL(href); } catch {}
-  if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) return null;
-  const link = element("a", "", label);
-  link.href = url.href;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  return link;
-}
-async function startQuiz(target) {
-  const { response, payload } = await apiRaw("/quiz/start", { email: target });
-  if (!response.ok) throw quizError(response, payload);
-  if (payload.status !== "quiz") throw new FeedbackError(copy.failed);
-  quizAttempt = { email: target, id: payload.attemptId, count: payload.questions.length };
-  const holder = document.querySelector("#quiz-questions");
-  holder.replaceChildren();
-  for (const question of payload.questions) {
-    const fieldset = element("fieldset");
-    const legend = element("legend", "", fill(copy.quizQuestion, { n: question.n }) + " ");
-    legend.append(element("span", "topic", question.topic), document.createElement("br"), question.q);
-    fieldset.append(legend);
-    question.options.forEach((option, index) => {
-      const label = element("label");
-      const input = element("input");
-      input.type = "radio";
-      input.name = "quiz-" + question.n;
-      input.value = String(index);
-      label.append(input, element("span", "", String.fromCharCode(65 + index) + ". " + option));
-      fieldset.append(label);
-    });
-    holder.append(fieldset);
-  }
-  document.querySelector("#quiz-note").textContent = fill(copy.quizNeeded, { total: payload.questions.length, pass: payload.passScore });
-  document.querySelector("#quiz-form").hidden = false;
-  document.querySelector("#quiz-review").hidden = true;
-  quizSection.hidden = false;
-  holder.querySelector("input")?.focus();
-}
-function showReview(review) {
-  const list = document.querySelector("#quiz-review-list");
-  list.replaceChildren();
-  for (const item of review ?? []) {
-    const entry = element("li");
-    entry.append(element("strong", "", item.q));
-    const options = element("ul");
-    item.options.forEach((option, index) => {
-      const isRight = index === item.correct;
-      const isChosen = index === item.chosen;
-      if (!isRight && !isChosen) return;
-      const line = element("li", isRight ? "right" : "wrong", option);
-      line.append(" (" + (isRight ? copy.quizCorrect : copy.quizYourAnswer) + (isRight && isChosen ? " · " + copy.quizYourAnswer : "") + ")");
-      options.append(line);
-    });
-    entry.append(options);
-    if (item.explain) entry.append(element("p", "", item.explain));
-    const links = element("p");
-    if (item.source?.url) {
-      const link = safeLink(item.source.url, copy.quizSource + (item.source.date ? " (" + item.source.date + ")" : ""));
-      if (link) links.append(link);
-    }
-    for (const learn of item.learn ?? []) {
-      const link = safeLink(learn.u, copy.quizLearn + ": " + learn.t);
-      if (link) links.append(links.childNodes.length ? " · " : "", link);
-    }
-    if (links.childNodes.length) entry.append(links);
-    list.append(entry);
-  }
-  document.querySelector("#quiz-review").hidden = !(review ?? []).length;
-}
-if (quizEnabled) {
-  document.querySelector("#quiz-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    act(event.submitter, async () => {
-      if (!quizAttempt) throw new FeedbackError(copy.quizExpired);
-      const answers = [];
-      for (let n = 1; n <= quizAttempt.count; n++) {
-        const picked = document.querySelector('input[name="quiz-' + n + '"]:checked');
-        if (!picked) throw new FeedbackError(copy.quizAnswerAll);
-        answers.push(Number(picked.value));
-      }
-      const attempt = quizAttempt;
-      quizAttempt = null;
-      const { response, payload } = await apiRaw("/quiz/submit", { email: attempt.email, attemptId: attempt.id, answers });
-      document.querySelector("#quiz-form").hidden = true;
-      if (!response.ok) throw quizError(response, payload);
-      showReview(payload.review);
-      const values = { score: payload.score, total: payload.total, pass: payload.passScore };
-      if (!payload.passed) {
-        throw new FeedbackError(fill(copy.quizFailed, { ...values, time: when(payload.retryAt) }));
-      }
-      if (payload.recorded) return showStatus(fill(copy.quizRecorded, values));
-      if (await sendCode(attempt.email) !== "sent") throw new FeedbackError(copy.failed);
-      email.value = attempt.email;
-      code.focus();
-      showStatus(fill(copy.quizPassed, values));
-    });
-  });
-}
 requestForm.addEventListener("submit", (event) => {
   event.preventDefault();
   act(event.submitter, async () => {
     const target = email.value.trim().toLowerCase();
-    if (!quizEnabled) {
-      await api("/email-otp/send-verification-otp", { email: target, type: "sign-in" });
-      requestedEmail = target;
-      code.focus();
-      showStatus(copy.sent);
-      return;
-    }
-    if (await sendCode(target) === "quiz") return startQuiz(target);
-    if (quizSection) quizSection.hidden = true;
+    await api("/email-otp/send-verification-otp", { email: target, type: "sign-in" });
+    requestedEmail = target;
     code.focus();
     showStatus(copy.sent);
   });
@@ -448,4 +277,172 @@ document.querySelector("#consent").addEventListener("submit", (event) => {
     }), copy.consentDone);
   });
 });`);
+}
+
+/** Post-login quiz for OAuth clients listed in QUIZ_CLIENTS. Only served when QUIZ_REGISTRATION=on. */
+const quizStyle = `
+  [hidden]{display:none!important}
+  .quiz h2{font-size:18px;margin:0 0 6px}
+  .quiz-note{margin:0 0 12px;color:var(--muted);font-size:14px;line-height:1.5}
+  .quiz fieldset{margin:0 0 12px;padding:12px 14px;border:1px solid var(--line);border-radius:12px}
+  .quiz legend{padding:0 4px;font-weight:600;line-height:1.5}
+  .quiz .topic{display:inline-block;margin-left:6px;padding:0 8px;border-radius:10px;background:var(--bg);color:var(--muted);font-size:12px;font-weight:500}
+  .quiz label{display:flex;gap:10px;align-items:flex-start;padding:6px 4px;cursor:pointer;line-height:1.45}
+  .quiz label input{width:auto;margin:3px 0 0;flex:none}
+  .quiz-review ol{margin:8px 0 0;padding-left:20px}
+  .quiz-review li{margin-bottom:12px}
+  .quiz-review ul{margin:4px 0;padding-left:18px}
+  .quiz-review .right{color:#087443;font-weight:600}
+  .quiz-review .wrong{color:#a32222;text-decoration:line-through}
+  .quiz-review p{margin:4px 0;font-size:14px;color:var(--muted);line-height:1.5}
+  .quiz-review a{color:#005040}`;
+
+export function quizPage(location: PageLocation, query: string, learnBase = "") {
+  const copy = quizCopy[location.language];
+  const base = learnBase.trim() ? learnBase.trim().replace(/\/*$/, "/") : "";
+  return page(location, copy.quizTitle, query, `
+<section id="quiz" class="quiz" data-learn-base="${escapeHtml(base)}">
+  <p id="quiz-note" class="quiz-note"></p>
+  <form id="quiz-form" hidden><div id="quiz-questions"></div><button type="submit">${copy.quizSubmit}</button></form>
+  <div id="quiz-review" class="quiz-review" hidden><h2>${copy.quizReview}</h2><ol id="quiz-review-list"></ol></div>
+  <form id="quiz-continue" class="actions" hidden><button type="submit">${copy.quizContinue}</button></form>
+</section>`, `
+Object.assign(copy, ${JSON.stringify(copy)});
+function fill(text, values) {
+  return text.replace(/\\{(\\w+)\\}/g, (match, key) => key in values ? String(values[key]) : match);
+}
+function when(ms) {
+  return new Intl.DateTimeFormat(language === "zh" ? "zh-CN" : language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(ms));
+}
+async function apiRaw(path, body) {
+  const response = await fetch(prefix + "/api/auth" + path, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-Passport-Language": language },
+    body: JSON.stringify(body),
+  });
+  return { response, payload: await response.json().catch(() => ({})) };
+}
+function quizError(response, payload) {
+  const retry = typeof payload.retryAt === "number" ? when(payload.retryAt) : "";
+  if (payload.code === "QUIZ_COOLDOWN") return new FeedbackError(fill(copy.quizCooldown, { time: retry }));
+  if (payload.code === "QUIZ_LIMIT") return new FeedbackError(fill(copy.quizLimit, { time: retry }));
+  if (payload.code === "QUIZ_ATTEMPT_INVALID") return new FeedbackError(copy.quizExpired);
+  if (payload.code === "QUIZ_UNAVAILABLE" || response.status === 404) return new FeedbackError(copy.quizUnavailable);
+  if (response.status === 429) return new FeedbackError(copy.rateLimited);
+  return new FeedbackError(copy.failed);
+}
+const quizSection = document.querySelector("#quiz");
+const quizForm = document.querySelector("#quiz-form");
+const continueForm = document.querySelector("#quiz-continue");
+let quizAttempt = null;
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+function safeLink(href, label) {
+  const learnBase = quizSection.dataset.learnBase;
+  let url = null;
+  try { url = href.startsWith("/") ? (learnBase ? new URL(href.replace(/^\\/+/, ""), learnBase) : null) : new URL(href); } catch {}
+  if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) return null;
+  const link = element("a", "", label);
+  link.href = url.href;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  return link;
+}
+async function continueAuthorization() {
+  const { response, payload } = await apiRaw("/oauth2/continue", { postLogin: true, oauth_query: oauthQuery });
+  if (!response.ok) throw new FeedbackError(copy.cannotReturn);
+  finish(payload, copy.signedIn);
+}
+function renderQuiz(payload) {
+  quizAttempt = { id: payload.attemptId, count: payload.questions.length };
+  const holder = document.querySelector("#quiz-questions");
+  holder.replaceChildren();
+  for (const question of payload.questions) {
+    const fieldset = element("fieldset");
+    const legend = element("legend", "", fill(copy.quizQuestion, { n: question.n }) + " ");
+    legend.append(element("span", "topic", question.topic), document.createElement("br"), question.q);
+    fieldset.append(legend);
+    question.options.forEach((option, index) => {
+      const label = element("label");
+      const input = element("input");
+      input.type = "radio";
+      input.name = "quiz-" + question.n;
+      input.value = String(index);
+      label.append(input, element("span", "", String.fromCharCode(65 + index) + ". " + option));
+      fieldset.append(label);
+    });
+    holder.append(fieldset);
+  }
+  document.querySelector("#quiz-note").textContent = fill(copy.quizNeeded, { total: payload.questions.length, pass: payload.passScore });
+  quizForm.hidden = false;
+}
+function showReview(review) {
+  const list = document.querySelector("#quiz-review-list");
+  list.replaceChildren();
+  for (const item of review ?? []) {
+    const entry = element("li");
+    entry.append(element("strong", "", item.q));
+    const options = element("ul");
+    item.options.forEach((option, index) => {
+      const isRight = index === item.correct;
+      const isChosen = index === item.chosen;
+      if (!isRight && !isChosen) return;
+      const line = element("li", isRight ? "right" : "wrong", option);
+      line.append(" (" + (isRight ? copy.quizCorrect : copy.quizYourAnswer) + (isRight && isChosen ? " · " + copy.quizYourAnswer : "") + ")");
+      options.append(line);
+    });
+    entry.append(options);
+    if (item.explain) entry.append(element("p", "", item.explain));
+    const links = element("p");
+    if (item.source?.url) {
+      const link = safeLink(item.source.url, copy.quizSource + (item.source.date ? " (" + item.source.date + ")" : ""));
+      if (link) links.append(link);
+    }
+    for (const learn of item.learn ?? []) {
+      const link = safeLink(learn.u, copy.quizLearn + ": " + learn.t);
+      if (link) links.append(links.childNodes.length ? " · " : "", link);
+    }
+    if (links.childNodes.length) entry.append(links);
+    list.append(entry);
+  }
+  document.querySelector("#quiz-review").hidden = !(review ?? []).length;
+}
+async function startQuiz() {
+  const { response, payload } = await apiRaw("/quiz/start", {});
+  if (!response.ok) throw quizError(response, payload);
+  if (payload.status === "passed") return continueAuthorization();
+  renderQuiz(payload);
+}
+startQuiz().catch((error) => showStatus(error instanceof FeedbackError ? error.message : copy.failed, "error"));
+quizForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  act(event.submitter, async () => {
+    if (!quizAttempt) throw new FeedbackError(copy.quizExpired);
+    const answers = [];
+    for (let n = 1; n <= quizAttempt.count; n++) {
+      const picked = document.querySelector('input[name="quiz-' + n + '"]:checked');
+      if (!picked) throw new FeedbackError(copy.quizAnswerAll);
+      answers.push(Number(picked.value));
+    }
+    const attempt = quizAttempt;
+    quizAttempt = null;
+    const { response, payload } = await apiRaw("/quiz/submit", { attemptId: attempt.id, answers });
+    quizForm.hidden = true;
+    if (!response.ok) throw quizError(response, payload);
+    showReview(payload.review);
+    const values = { score: payload.score, total: payload.total, pass: payload.passScore };
+    if (!payload.passed) throw new FeedbackError(fill(copy.quizFailed, { ...values, time: when(payload.retryAt) }));
+    showStatus(fill(copy.quizPassed, values));
+    continueForm.hidden = false;
+    continueForm.querySelector("button").focus();
+  });
+});
+continueForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  act(event.submitter, continueAuthorization);
+});`, "", "", quizStyle);
 }

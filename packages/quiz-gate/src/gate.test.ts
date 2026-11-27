@@ -86,7 +86,7 @@ test("a pass token expires and tampering breaks the signature", async () => {
   const token = result.pass.token;
   const [prefix, jti, expiry, signature] = token.split(".");
   assert.equal(await gate.checkPass(`${prefix}.${jti}.${Number(expiry) + 60_000}.${signature}`, "new@example.test"), false);
-  assert.equal(await gate.checkPass(`${prefix}.${jti}.${expiry}.${signature.slice(0, -1)}A`, "new@example.test"), false);
+  assert.equal(await gate.checkPass(`${prefix}.${jti}.${expiry}.${signature.slice(0, -1)}${signature.endsWith("A") ? "E" : "A"}`, "new@example.test"), false);
   assert.equal(await gate.checkPass("garbage", "new@example.test"), false);
   assert.equal(await gate.checkPass(undefined, "new@example.test"), false);
   advance(DEFAULT_POLICY.passTtlMs - 1);

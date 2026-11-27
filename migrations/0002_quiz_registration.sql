@@ -1,9 +1,18 @@
--- Quiz-gated registration (packages/quiz-gate, src/quiz). Safe to apply with the flag off.
+-- Quiz-gated access for selected OAuth clients (packages/quiz-gate, src/quiz).
+-- Only needed when QUIZ_REGISTRATION=on. Adds new tables only: the Better Auth
+-- tables ("user", "account", ...) are not changed, and nothing reads these
+-- tables while the flag is off.
 
--- How the account was created ("quiz", "email-otp", "google", "github", "link:coliving", ...)
--- and when its owner last passed the quiz. createdAt is the registration time.
-ALTER TABLE "user" ADD COLUMN "registrationMethod" TEXT;
-ALTER TABLE "user" ADD COLUMN "quizPassedAt" DATE;
+-- One row per user who passed the quiz. registration_method is how the account
+-- was created ("email-otp", "google", "github", ...), recorded at pass time.
+-- The account's own createdAt stays the registration time.
+CREATE TABLE quiz_registration (
+  user_id TEXT PRIMARY KEY NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+  registration_method TEXT NOT NULL,
+  quiz_passed_at INTEGER NOT NULL,
+  score INTEGER NOT NULL,
+  total INTEGER NOT NULL
+);
 
 -- The bank lives here, seeded by scripts/seed-quiz-bank.mjs from a file outside git.
 -- body is the full question JSON, answer included. It never leaves the Worker unscored.

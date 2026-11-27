@@ -2,7 +2,7 @@
 
 Quiz-gated registration as a small, framework-free module. It needs only Web Crypto, so it runs on Cloudflare Workers, Node 20+, Deno and Bun.
 
-It decides who may register. It does not send mail, create users or set sessions. The host does those (Passport does it with Better Auth in `src/quiz/`).
+It decides who passed. It does not send mail, create users, set sessions or decide which app needs a pass. The host does those (Passport does it with Better Auth in `src/quiz/`, per OAuth client).
 
 ```ts
 import { createQuizGate, MemoryQuizStore } from "@4seas/quiz-gate";

@@ -91,11 +91,15 @@ export class SqliteD1 {
     return this;
   }
 
-  /** Applies migrations/*.sql in order, like `wrangler d1 migrations apply`. */
-  static migrated() {
+  /**
+   * Applies migrations/*.sql in order, like `wrangler d1 migrations apply`.
+   * `before` stops at that file, e.g. "0002" gives main's production schema.
+   */
+  static migrated(options: { before?: string } = {}) {
     const d1 = new SqliteD1();
     const directory = join(dirname(fileURLToPath(import.meta.url)), "../../migrations");
     for (const file of readdirSync(directory).filter((name) => name.endsWith(".sql")).sort()) {
+      if (options.before && file >= options.before) break;
       d1.sqlite.exec(readFileSync(join(directory, file), "utf8"));
     }
     return d1;

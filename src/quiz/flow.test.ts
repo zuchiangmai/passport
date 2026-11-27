@@ -1,6 +1,8 @@
-// End-to-end flows through the real Worker fetch handler, Better Auth and the quiz plugin,
-// on an in-memory SQLite D1 with every migration applied. Resend is replaced by a capture.
+// End-to-end flows through the real Worker fetch handler and Better Auth on an in-memory
+// SQLite D1. Resend is replaced by a capture. Covers the zero-impact guarantee with the
+// switch off (on main's schema, without migration 0002) and per-client gating with it on.
 import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import worker from "../index.ts";
@@ -11,17 +13,19 @@ import { bankSeedSql, clearBankCache } from "./bank.ts";
 const SITE = "http://127.0.0.1:8788";
 const UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36";
 const bank = JSON.parse(readFileSync(new URL("../../quiz/bank.example.json", import.meta.url), "utf8")) as { id: string; answer: number }[];
+// Columns of "user" and fields of a session user on main. The switch off must not add any.
+const MAIN_USER_COLUMNS = ["id", "name", "email", "emailVerified", "image", "createdAt", "updatedAt"];
+const MAIN_SESSION_USER_FIELDS = ["createdAt", "email", "emailVerified", "id", "image", "name", "updatedAt"];
 
-type Mail = { to: string; subject: string; text: string };
+type Mail = { to: string; text: string };
 let mails: Mail[] = [];
 const realFetch = globalThis.fetch;
-
 before(() => {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url !== "https://api.resend.com/emails") throw new Error(`unexpected network call to ${url}`);
     const body = JSON.parse(String(init?.body));
-    mails.push({ to: body.to[0], subject: body.subject, text: body.text });
+    mails.push({ to: body.to[0], text: body.text });
     return Response.json({ id: `test-${mails.length}` });
   }) as typeof fetch;
 });
@@ -31,11 +35,12 @@ after(() => {
 
 let ipCounter = 0;
 
-function setup(mode: "off" | "on" | "strict" = "on") {
+function setup(options: { mode?: "off" | "on"; schema?: "main" | "full"; clients?: string } = {}) {
+  const { mode = "on", schema = "full" } = options;
   mails = [];
   clearBankCache();
-  const d1 = SqliteD1.migrated();
-  d1.sqlite.exec(bankSeedSql(bank));
+  const d1 = SqliteD1.migrated(schema === "main" ? { before: "0002" } : {});
+  if (schema === "full") d1.sqlite.exec(bankSeedSql(bank));
   const pending: Promise<unknown>[] = [];
   const env: Env = {
     DB: d1.asD1(),
@@ -45,7 +50,10 @@ function setup(mode: "off" | "on" | "strict" = "on") {
     BETTER_AUTH_URL: SITE,
     BETTER_AUTH_SECRET: "integration-test-secret-0123456789abcdef",
     MAIL_FROM: "Passport Test <no-reply@example.test>",
-    QUIZ_REGISTRATION: mode,
+    COLIVING_CLIENT_SECRET: "coliving-test-secret",
+    LINK_SERVICE_KEY: "link-test-key",
+    ...(mode === "on" ? { QUIZ_REGISTRATION: "on" } : {}),
+    ...(options.clients !== undefined ? { QUIZ_CLIENTS: options.clients } : {}),
   };
   const ctx = { waitUntil: (p: Promise<unknown>) => void pending.push(p), passThroughOnException() {}, props: {} } as unknown as ExecutionContext;
 
@@ -57,18 +65,20 @@ function setup(mode: "off" | "on" | "strict" = "on") {
       this.userAgent = userAgent;
     }
     async request(path: string, body?: unknown, headers: Record<string, string> = {}) {
+      const form = body instanceof URLSearchParams;
       const init: RequestInit = {
         method: body === undefined ? "GET" : "POST",
+        redirect: "manual",
         headers: {
           Accept: "application/json",
           Origin: SITE,
           "User-Agent": this.userAgent,
           "CF-Connecting-IP": this.ip,
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(body === undefined ? {} : { "Content-Type": form ? "application/x-www-form-urlencoded" : "application/json" }),
           ...(this.jar.size ? { Cookie: [...this.jar].map(([k, v]) => `${k}=${v}`).join("; ") } : {}),
           ...headers,
         },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(body === undefined ? {} : { body: form ? body.toString() : JSON.stringify(body) }),
       };
       const response = await worker.fetch(new Request(SITE + path, init) as never, env, ctx);
       await Promise.all(pending.splice(0));
@@ -87,18 +97,9 @@ function setup(mode: "off" | "on" | "strict" = "on") {
     }
   }
 
-  const user = (email: string) => d1.sqlite.prepare(
-    'SELECT id, email, emailVerified, registrationMethod, quizPassedAt FROM "user" WHERE email = ?',
-  ).get(email) as Record<string, any> | undefined;
-
-  /** Shown option indexes that answer `correct` of the attempt's questions right. */
-  function answersFor(attemptId: string, correct: number) {
-    const row = d1.sqlite.prepare("SELECT items FROM quiz_attempt WHERE id = ?").get(attemptId) as { items: string };
-    return (JSON.parse(row.items) as { id: string; perm: number[] }[]).map((item, k) => {
-      const right = item.perm.indexOf(bank.find((q) => q.id === item.id)!.answer);
-      return k < correct ? right : (right + 1) % item.perm.length;
-    });
-  }
+  const tables = () => (d1.sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((r) => r.name);
+  const userRow = (email: string) => d1.sqlite.prepare('SELECT * FROM "user" WHERE email = ?').get(email) as Record<string, unknown> | undefined;
+  const quizRow = (userId: string) => d1.sqlite.prepare("SELECT * FROM quiz_registration WHERE user_id = ?").get(userId) as Record<string, any> | undefined;
 
   function codeFor(email: string) {
     const mail = mails.filter((m) => m.to === email).at(-1);
@@ -106,260 +107,316 @@ function setup(mode: "off" | "on" | "strict" = "on") {
     return /\b(\d{6})\b/.exec(mail.text)![1];
   }
 
-  async function passQuiz(browser: Browser, email: string, correct = 3) {
-    const started = await browser.request("/api/auth/quiz/start", { email });
-    assert.equal(started.status, 200, started.text);
-    assert.equal(started.json.status, "quiz");
-    return browser.request("/api/auth/quiz/submit", {
-      email, attemptId: started.json.attemptId, answers: answersFor(started.json.attemptId, correct),
+  /** Any method of signing up or in. Email code here; social users are inserted with an account row. */
+  async function signIn(email: string, browser = new Browser()) {
+    d1.sqlite.prepare("DELETE FROM otp_send WHERE email = ?").run(email); // the 60 s resend cooldown
+    const sent = await browser.request("/api/auth/email-otp/send-verification-otp", { email, type: "sign-in" });
+    assert.equal(sent.status, 200, sent.text);
+    const signedIn = await browser.request("/api/auth/sign-in/email-otp", { email, otp: codeFor(email) });
+    assert.equal(signedIn.status, 200, signedIn.text);
+    return { browser, user: signedIn.json.user as { id: string; email: string } };
+  }
+
+  /** Registers a confidential OIDC client the way an admin would, directly in D1. */
+  async function createClient(name: string) {
+    const secret = randomBytes(24).toString("base64url");
+    const client = { client_id: `${name}-${randomBytes(4).toString("hex")}`, client_secret: secret, redirect_uris: [`https://${name}.example.test/auth/callback`] };
+    const now = new Date().toISOString();
+    d1.sqlite.prepare(`
+      INSERT INTO "oauthClient" (id, clientId, clientSecret, skipConsent, scopes, redirectUris, tokenEndpointAuthMethod,
+        grantTypes, responseTypes, applicationType, name, createdAt, updatedAt, disabled)
+      VALUES (?, ?, ?, 1, ?, ?, 'client_secret_post', ?, ?, 'web', ?, ?, ?, 0)
+    `).run(randomBytes(8).toString("hex"), client.client_id, createHash("sha256").update(secret).digest("base64url"),
+      JSON.stringify(["openid", "email", "profile"]), JSON.stringify(client.redirect_uris),
+      JSON.stringify(["authorization_code"]), JSON.stringify(["code"]), name, now, now);
+    return client;
+  }
+
+  /** Starts an OIDC authorization. Returns the code, or where Passport sent the user instead. */
+  async function authorize(browser: Browser, client: { client_id: string; redirect_uris: string[] }) {
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const params = new URLSearchParams({
+      response_type: "code", client_id: client.client_id, redirect_uri: client.redirect_uris[0],
+      scope: "openid email profile", state: "s-1", code_challenge: challenge, code_challenge_method: "S256",
+    });
+    const response = await browser.request(`/api/auth/oauth2/authorize?${params}`);
+    const location = response.headers.get("location") ?? response.json.url;
+    assert.ok(location, `authorize redirects: ${response.status} ${response.text}`);
+    return { location: String(location), verifier, ...redirectResult(String(location), client) };
+  }
+
+  function redirectResult(location: string, client: { redirect_uris: string[] }) {
+    const url = new URL(location, SITE);
+    if (location.startsWith(client.redirect_uris[0])) return { code: url.searchParams.get("code") };
+    return { code: null, page: url.pathname, query: url.search.slice(1) };
+  }
+
+  async function exchange(client: { client_id: string; client_secret: string; redirect_uris: string[] }, code: string, verifier: string) {
+    const token = await new Browser().request("/api/auth/oauth2/token", new URLSearchParams({
+      grant_type: "authorization_code", code, redirect_uri: client.redirect_uris[0], code_verifier: verifier,
+      client_id: client.client_id, client_secret: client.client_secret,
+    }));
+    assert.equal(token.status, 200, token.text);
+    const userinfo = await new Browser().request("/api/auth/oauth2/userinfo", undefined, { Authorization: `Bearer ${token.json.access_token}` });
+    assert.equal(userinfo.status, 200, userinfo.text);
+    return { token: token.json, userinfo: userinfo.json };
+  }
+
+  async function answers(attemptId: string, correct: number) {
+    const row = d1.sqlite.prepare("SELECT items FROM quiz_attempt WHERE id = ?").get(attemptId) as { items: string };
+    return (JSON.parse(row.items) as { id: string; perm: number[] }[]).map((item, k) => {
+      const right = item.perm.indexOf(bank.find((q) => q.id === item.id)!.answer);
+      return k < correct ? right : (right + 1) % item.perm.length;
     });
   }
 
-  return { d1, env, Browser, user, answersFor, codeFor, passQuiz };
+  async function takeQuiz(browser: Browser, correct: number) {
+    const started = await browser.request("/api/auth/quiz/start", {});
+    assert.equal(started.status, 200, started.text);
+    assert.equal(started.json.status, "quiz");
+    return browser.request("/api/auth/quiz/submit", { attemptId: started.json.attemptId, answers: await answers(started.json.attemptId, correct) });
+  }
+
+  return { d1, env, Browser, tables, userRow, quizRow, codeFor, signIn, createClient, authorize, redirectResult, exchange, takeQuiz };
 }
 
-test("flag on: an unknown email gets no code and no mail until it passes the quiz", async () => {
-  const { Browser } = setup();
-  const browser = new Browser();
-  const response = await browser.request("/api/auth/email-otp/send-verification-otp", { email: "new@example.test", type: "sign-in" });
-  assert.equal(response.status, 403);
-  assert.equal(response.json.code, "QUIZ_REQUIRED");
-  assert.equal(mails.length, 0);
-});
+// ---------- switch off: zero impact, on main's schema ----------
 
-test("flag on: new email, quiz passed, email code, account created with method and time, signed in", async () => {
-  const { Browser, user, codeFor, passQuiz, d1 } = setup();
-  const browser = new Browser();
-  const email = "fresh@example.test";
-
-  const started = await browser.request("/api/auth/quiz/start", { email });
-  assert.equal(started.json.questions.length, 3);
-  assert.ok(!started.text.includes('"answer"'), "answers never reach the client before scoring");
-
-  const submitted = await passQuiz(browser, email, 2);
-  assert.equal(submitted.status, 200);
-  assert.equal(submitted.json.passed, true);
-  assert.equal(submitted.json.score, 2);
-  assert.equal(submitted.json.review.length, 3);
-  assert.ok(browser.jar.has("passport_quiz_pass"), "the pass rides in an httpOnly cookie");
-  assert.match(submitted.headers.getSetCookie().join("\n"), /passport_quiz_pass=[^;]+;.*HttpOnly/i);
-  assert.equal(user(email), undefined, "no account before the email is proven");
-
-  const sent = await browser.request("/api/auth/email-otp/send-verification-otp", { email, type: "sign-in" });
-  assert.equal(sent.status, 200, sent.text);
-  assert.equal(mails.length, 1);
-  assert.equal(mails[0].to, email);
-
-  const before = Date.now();
-  const signedIn = await browser.request("/api/auth/sign-in/email-otp", { email, otp: codeFor(email) });
-  assert.equal(signedIn.status, 200, signedIn.text);
-  const row = user(email)!;
-  assert.equal(row.emailVerified, 1);
-  assert.equal(row.registrationMethod, "quiz");
-  assert.ok(new Date(row.quizPassedAt).getTime() >= before - 1000);
-  assert.ok(!browser.jar.has("passport_quiz_pass"), "the pass cookie is cleared after use");
-  const consumed = d1.sqlite.prepare("SELECT COUNT(*) AS n FROM quiz_pass WHERE consumed_at IS NOT NULL").get() as { n: number };
-  assert.equal(consumed.n, 1);
-
+test("off, main schema: email sign-up and sign-in work and user rows and sessions match main", async () => {
+  const { tables, userRow, signIn } = setup({ mode: "off", schema: "main" });
+  assert.ok(!tables().some((name) => name.startsWith("quiz_")), "no quiz tables exist");
+  const { browser, user } = await signIn("open@example.test");
+  assert.deepEqual(Object.keys(userRow("open@example.test")!), MAIN_USER_COLUMNS);
   const session = await browser.request("/api/auth/get-session");
-  assert.equal(session.json.user.email, email);
-  assert.equal(session.json.user.registrationMethod, "quiz");
+  assert.equal(session.json.user.id, user.id);
+  assert.deepEqual(Object.keys(session.json.user).sort(), MAIN_SESSION_USER_FIELDS);
+  assert.equal((await signIn("open@example.test")).user.id, user.id, "returning sign-in");
 });
 
-test("flag on: failing sets a cooldown, keeps codes blocked, and shows the review", async () => {
-  const { Browser, passQuiz } = setup();
+test("off, main schema: OIDC clients get codes and standard claims only, even if QUIZ_CLIENTS is set", async () => {
+  const ctx = setup({ mode: "off", schema: "main" });
+  const client = await ctx.createClient("topic-research");
+  ctx.env.QUIZ_CLIENTS = client.client_id; // ignored while the switch is off
+  const { browser } = await ctx.signIn("reader@example.test");
+  const started = await ctx.authorize(browser, client);
+  assert.ok(started.code, `code issued directly, got ${started.location}`);
+  const { userinfo, token } = await ctx.exchange(client, started.code!, started.verifier);
+  assert.deepEqual(Object.keys(userinfo).sort(), ["email", "email_verified", "name", "sub"]);
+  const idClaims = JSON.parse(Buffer.from(String(token.id_token).split(".")[1], "base64url").toString());
+  assert.ok(!Object.keys(idClaims).some((key) => key.includes("quiz") || key.includes("registration")));
+});
+
+test("off, main schema: CoLiving link, legacy authorize and token exchange work", async () => {
+  const { Browser, signIn, userRow } = setup({ mode: "off", schema: "main" });
+  const linked = await new Browser().request("/v1/identity/links", { email: "resident@example.test", app: "coliving", external_id: "r-1" }, { "X-Service-Key": "link-test-key" });
+  assert.equal(linked.status, 200, linked.text);
+  assert.deepEqual(Object.keys(userRow("resident@example.test")!), MAIN_USER_COLUMNS);
+  const { browser } = await signIn("resident@example.test");
+  const authorized = await browser.request("/v1/connect/authorize", { client_id: "coliving", redirect_uri: "https://4seas.xyz/coliving/auth/callback", state: "st" });
+  assert.equal(authorized.status, 200, authorized.text);
+  const exchanged = await new Browser().request("/v1/connect/token", {
+    client_id: "coliving", client_secret: "coliving-test-secret", code: authorized.json.code, redirect_uri: "https://4seas.xyz/coliving/auth/callback",
+  });
+  assert.equal(exchanged.status, 200, exchanged.text);
+  assert.equal(exchanged.json.sub, authorized.json.sub);
+});
+
+test("off, main schema: legacy passcode API works", async () => {
+  const { Browser, codeFor } = setup({ mode: "off", schema: "main" });
   const browser = new Browser();
-  const email = "fail@example.test";
-  const failed = await passQuiz(browser, email, 1);
-  assert.equal(failed.json.passed, false);
-  assert.ok(failed.json.retryAt - Date.now() > 23 * 3600_000, "one correct waits a day");
-  assert.equal(failed.json.pass, undefined);
-  assert.equal(failed.json.review.filter((r: { ok: boolean }) => r.ok).length, 1);
-  assert.ok(!browser.jar.has("passport_quiz_pass"));
-  const sent = await browser.request("/api/auth/email-otp/send-verification-otp", { email, type: "sign-in" });
-  assert.equal(sent.status, 403);
-  const again = await browser.request("/api/auth/quiz/start", { email });
-  assert.equal(again.status, 429);
-  assert.equal(again.json.code, "QUIZ_COOLDOWN");
-  assert.equal(again.json.retryAt, failed.json.retryAt);
-});
-
-test("flag on: zero correct waits seven days", async () => {
-  const { Browser, passQuiz } = setup();
-  const failed = await passQuiz(new Browser(), "zero@example.test", 0);
-  assert.equal(failed.json.passed, false);
-  assert.ok(failed.json.retryAt - Date.now() > 6.9 * 86_400_000);
-});
-
-test("flag on: a pass is bound to its email and cannot be replayed", async () => {
-  const { Browser, passQuiz, codeFor, d1 } = setup();
-  const browser = new Browser();
-  const passed = await passQuiz(browser, "owner@example.test");
-  const token = passed.json.pass.token as string;
-
-  const other = new Browser();
-  const stolen = await other.request("/api/auth/email-otp/send-verification-otp", { email: "thief@example.test", type: "sign-in" }, { "X-Quiz-Pass": token });
-  assert.equal(stolen.status, 403, "a pass for one email does not unlock another");
-
-  await browser.request("/api/auth/email-otp/send-verification-otp", { email: "owner@example.test", type: "sign-in" });
-  const signedIn = await browser.request("/api/auth/sign-in/email-otp", { email: "owner@example.test", otp: codeFor("owner@example.test") });
-  assert.equal(signedIn.status, 200);
-
-  // Even with the account gone, the used token opens nothing.
-  d1.sqlite.exec(`DELETE FROM "user" WHERE email = 'owner@example.test'`);
-  const replay = await other.request("/api/auth/email-otp/send-verification-otp", { email: "owner@example.test", type: "sign-in" }, { "X-Quiz-Pass": token });
-  assert.equal(replay.status, 403);
-});
-
-test("flag on: a code requested without a pass cannot create an account", async () => {
-  const { Browser, passQuiz, codeFor, user } = setup();
-  const browser = new Browser();
-  const email = "sneaky@example.test";
-  await passQuiz(browser, email);
-  await browser.request("/api/auth/email-otp/send-verification-otp", { email, type: "sign-in" });
-  // A second client with the code but no pass cookie.
-  const other = new Browser();
-  const attempt = await other.request("/api/auth/sign-in/email-otp", { email, otp: codeFor(email) });
-  assert.equal(attempt.status, 403);
-  assert.equal(attempt.json.code, "QUIZ_REQUIRED");
-  assert.equal(user(email), undefined);
-});
-
-test("flag on: an attempt belongs to the email that started it and is scored once", async () => {
-  const { Browser, answersFor } = setup();
-  const browser = new Browser();
-  const started = await browser.request("/api/auth/quiz/start", { email: "a@example.test" });
-  const answers = answersFor(started.json.attemptId, 3);
-  const wrongEmail = await browser.request("/api/auth/quiz/submit", { email: "b@example.test", attemptId: started.json.attemptId, answers });
-  assert.equal(wrongEmail.status, 410);
-  assert.equal(wrongEmail.json.code, "QUIZ_ATTEMPT_INVALID");
-  const retried = await browser.request("/api/auth/quiz/submit", { email: "a@example.test", attemptId: started.json.attemptId, answers });
-  assert.equal(retried.status, 410);
-});
-
-test("flag on: existing users sign in normally and skip the quiz", async () => {
-  const { Browser, d1, codeFor, user } = setup();
-  d1.sqlite.prepare(`INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt) VALUES ('u-old', 'Old', 'old@example.test', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`).run();
-  const browser = new Browser();
-  const start = await browser.request("/api/auth/quiz/start", { email: "old@example.test" });
-  assert.deepEqual(start.json, { status: "existing" });
-  const sent = await browser.request("/api/auth/email-otp/send-verification-otp", { email: "old@example.test", type: "sign-in" });
-  assert.equal(sent.status, 200);
-  const signedIn = await browser.request("/api/auth/sign-in/email-otp", { email: "old@example.test", otp: codeFor("old@example.test") });
-  assert.equal(signedIn.status, 200);
-  assert.equal(signedIn.json.user.id, "u-old");
-  assert.equal(user("old@example.test")!.registrationMethod, null, "existing rows are not rewritten");
-});
-
-test("flag on: a signed-in user can pass the quiz to record it on their account", async () => {
-  const { Browser, d1, codeFor, passQuiz, user } = setup();
-  d1.sqlite.prepare(`INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt, registrationMethod) VALUES ('u-gh', 'G', 'gh@example.test', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 'github')`).run();
-  const browser = new Browser();
-  await browser.request("/api/auth/email-otp/send-verification-otp", { email: "gh@example.test", type: "sign-in" });
-  await browser.request("/api/auth/sign-in/email-otp", { email: "gh@example.test", otp: codeFor("gh@example.test") });
-  const result = await passQuiz(browser, "gh@example.test");
-  assert.equal(result.json.recorded, true);
-  assert.equal(result.json.pass, undefined);
-  assert.ok(user("gh@example.test")!.quizPassedAt);
-  assert.equal(user("gh@example.test")!.registrationMethod, "github");
-});
-
-test("flag on: starts are limited per email per day", async () => {
-  const { Browser } = setup();
-  const browsers = [new Browser(), new Browser(), new Browser(), new Browser()];
-  for (const browser of browsers.slice(0, 3)) {
-    assert.equal((await browser.request("/api/auth/quiz/start", { email: "busy@example.test" })).status, 200);
-  }
-  const fourth = await browsers[3].request("/api/auth/quiz/start", { email: "busy@example.test" });
-  assert.equal(fourth.status, 429);
-  assert.equal(fourth.json.code, "QUIZ_LIMIT");
-});
-
-test("flag on: starts are limited per IP per day", async () => {
-  const { Browser, d1 } = setup();
-  const browser = new Browser();
-  const results = [];
-  for (let i = 0; i < 11; i++) {
-    // Clear Better Auth's own 10 per minute window so only the daily quiz limit applies.
-    d1.sqlite.exec("DELETE FROM rateLimit");
-    results.push(await browser.request("/api/auth/quiz/start", { email: `ip${i}@example.test` }));
-  }
-  assert.deepEqual(results.slice(0, 10).map((r) => r.status), Array(10).fill(200));
-  assert.equal(results[10].status, 429);
-  assert.equal(results[10].json.code, "QUIZ_LIMIT");
-  const elsewhere = await new Browser().request("/api/auth/quiz/start", { email: "ip10@example.test" });
-  assert.equal(elsewhere.status, 200, "another IP is unaffected");
-});
-
-test("flag on: Better Auth also throttles bursts on the quiz endpoints", async () => {
-  const { Browser } = setup();
-  const browser = new Browser();
-  const statuses = [];
-  for (let i = 0; i < 12; i++) statuses.push((await browser.request("/api/auth/quiz/start", { email: "x@" })).status);
-  assert.ok(statuses.includes(429), statuses.join(","));
-});
-
-test("flag on: crawlers cannot start a quiz", async () => {
-  const { Browser } = setup();
-  const bot = new Browser("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)");
-  const response = await bot.request("/api/auth/quiz/start", { email: "bot@example.test" });
-  assert.equal(response.status, 403);
-});
-
-test("flag on: legacy passcode API asks for the quiz and accepts quiz_pass", async () => {
-  const { Browser, passQuiz, codeFor, user } = setup();
-  const browser = new Browser();
-  const email = "legacy@example.test";
-  const blocked = await browser.request("/v1/auth/passcode/request", { email });
-  assert.equal(blocked.status, 403);
-  assert.equal(blocked.json.code, "quiz_required");
-  const passed = await passQuiz(new Browser(), email);
-  const token = passed.json.pass.token;
-  const requested = await browser.request("/v1/auth/passcode/request", { email, quiz_pass: token });
-  assert.equal(requested.status, 202);
-  const verified = await browser.request("/v1/auth/passcode/verify", { email, code: codeFor(email), quiz_pass: token });
+  assert.equal((await browser.request("/v1/auth/passcode/request", { email: "app@example.test" })).status, 202);
+  const verified = await browser.request("/v1/auth/passcode/verify", { email: "app@example.test", code: codeFor("app@example.test") });
   assert.equal(verified.status, 200, verified.text);
-  assert.equal(verified.json.email, email);
-  assert.equal(user(email)!.registrationMethod, "quiz");
+  assert.equal(verified.json.email, "app@example.test");
 });
 
-test("flag on: an empty bank reports the quiz as unavailable", async () => {
-  const { Browser, d1 } = setup();
-  d1.sqlite.exec("UPDATE quiz_question SET active = 0");
-  clearBankCache();
-  const response = await new Browser().request("/api/auth/quiz/start", { email: "x@example.test" });
-  assert.equal(response.status, 503);
-  assert.equal(response.json.code, "QUIZ_UNAVAILABLE");
+test("off: the quiz page and endpoints do not exist", async () => {
+  const { Browser, signIn } = setup({ mode: "off", schema: "main" });
+  const { browser } = await signIn("x@example.test");
+  assert.equal((await browser.request("/api/auth/quiz/start", {})).status, 404);
+  assert.equal((await new Browser().request("/passport/quiz")).status, 404);
 });
 
-test("flag off: sign-up by email code works as before and the quiz endpoints 404", async () => {
-  const { Browser, codeFor, user } = setup("off");
-  const browser = new Browser();
-  const email = "open@example.test";
-  assert.equal((await browser.request("/api/auth/quiz/start", { email })).status, 404);
-  assert.equal((await browser.request("/api/auth/email-otp/send-verification-otp", { email, type: "sign-in" })).status, 200);
-  assert.equal((await browser.request("/api/auth/sign-in/email-otp", { email, otp: codeFor(email) })).status, 200);
-  assert.equal(user(email)!.registrationMethod, "email-otp");
-  assert.equal(user(email)!.quizPassedAt, null);
-});
-
-test("sign-in pages show the quiz only when the flag is on", async () => {
-  for (const [mode, expected] of [["on", true], ["strict", true], ["off", false]] as const) {
-    const { Browser } = setup(mode);
-    for (const language of ["en", "zh", "th"]) {
-      const page = await new Browser().request(`/passport/${language}/login`);
-      assert.equal(page.status, 200);
-      assert.equal(page.text.includes('id="quiz"'), expected, `${mode} ${language}`);
-      assert.match(page.text, /data-provider="google"/);
-      assert.match(page.text, /data-provider="github"/);
-    }
+test("the sign-in page is byte-identical with the switch on and off", async () => {
+  const strip = (html: string) => html.replace(/nonce-?[="]?[A-Za-z0-9-]{36}"?/g, "NONCE").replace(/nonce="[^"]+"/g, "NONCE");
+  for (const language of ["en", "zh", "th"]) {
+    const off = await new (setup({ mode: "off", schema: "main" }).Browser)().request(`/passport/${language}/login`);
+    const on = await new (setup({ mode: "on", clients: "topic-research" }).Browser)().request(`/passport/${language}/login`);
+    assert.equal(off.status, 200);
+    assert.equal(strip(on.text), strip(off.text), language);
   }
 });
 
-test("linked CoLiving and canteen users are recorded with their link method", async () => {
-  const { Browser, env, user } = setup();
-  env.LINK_SERVICE_KEY = "link-key-for-tests";
-  const response = await new Browser().request("/v1/identity/links", { email: "resident@example.test", app: "coliving", external_id: "r-1" }, { "X-Service-Key": "link-key-for-tests" });
-  assert.equal(response.status, 200, response.text);
-  assert.equal(user("resident@example.test")!.registrationMethod, "link:coliving");
+// ---------- switch on: only listed clients are gated ----------
+
+test("on: a quiz client sends a new user to the quiz after sign-in, then issues a code once passed", async () => {
+  const ctx = setup();
+  const client = await ctx.createClient("topic-research");
+  ctx.env.QUIZ_CLIENTS = client.client_id;
+  const { browser, user } = await ctx.signIn("newbie@example.test");
+
+  const first = await ctx.authorize(browser, client);
+  assert.equal(first.code, null);
+  assert.equal(first.page, "/quiz");
+  const page = await browser.request(`/quiz?${first.query}`);
+  assert.equal(page.status, 200);
+  assert.match(page.text, /id="quiz-form"/);
+
+  // Skipping the quiz does not help: continuing re-checks the database.
+  const skipped = await browser.request("/api/auth/oauth2/continue", { postLogin: true, oauth_query: first.query });
+  assert.equal(ctx.redirectResult(skipped.json.url, client).page, "/quiz");
+
+  const submitted = await ctx.takeQuiz(browser, 2);
+  assert.equal(submitted.json.passed, true);
+  assert.equal(submitted.json.recorded, true);
+  const row = ctx.quizRow(user.id)!;
+  assert.equal(row.registration_method, "email");
+  assert.equal(row.score, 2);
+  assert.ok(row.quiz_passed_at > Date.now() - 60_000);
+
+  const continued = await browser.request("/api/auth/oauth2/continue", { postLogin: true, oauth_query: first.query });
+  const result = ctx.redirectResult(continued.json.url, client);
+  assert.ok(result.code, continued.text);
+  const { userinfo } = await ctx.exchange(client, result.code!, first.verifier);
+  assert.equal(userinfo.email, "newbie@example.test");
+
+  const again = await ctx.authorize(browser, client);
+  assert.ok(again.code, "a passed user goes straight through next time");
+  assert.deepEqual(Object.keys(ctx.userRow("newbie@example.test")!), MAIN_USER_COLUMNS, "the user table is unchanged");
+});
+
+test("on: failing keeps the quiz client closed and sets a cooldown", async () => {
+  const ctx = setup();
+  const client = await ctx.createClient("topic-research");
+  ctx.env.QUIZ_CLIENTS = client.client_id;
+  const { browser, user } = await ctx.signIn("fail@example.test");
+  const first = await ctx.authorize(browser, client);
+  const failed = await ctx.takeQuiz(browser, 1);
+  assert.equal(failed.json.passed, false);
+  assert.equal(failed.json.recorded, false);
+  assert.ok(failed.json.retryAt - Date.now() > 23 * 3600_000);
+  assert.equal(failed.json.review.length, 3);
+  assert.equal(ctx.quizRow(user.id), undefined);
+  const continued = await browser.request("/api/auth/oauth2/continue", { postLogin: true, oauth_query: first.query });
+  assert.equal(ctx.redirectResult(continued.json.url, client).page, "/quiz");
+  const retry = await browser.request("/api/auth/quiz/start", {});
+  assert.equal(retry.status, 429);
+  assert.equal(retry.json.code, "QUIZ_COOLDOWN");
+});
+
+test("on: users who signed up with Google or GitHub take the same quiz, and the method is recorded", async () => {
+  const ctx = setup();
+  const client = await ctx.createClient("topic-research");
+  ctx.env.QUIZ_CLIENTS = client.client_id;
+  const now = new Date().toISOString();
+  ctx.d1.sqlite.exec(`
+    INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt) VALUES ('u-gh', 'G', 'gh@example.test', 1, '${now}', '${now}');
+    INSERT INTO "account" (id, accountId, providerId, userId, createdAt, updatedAt) VALUES ('a-gh', '123', 'github', 'u-gh', '${now}', '${now}');
+  `);
+  const { browser } = await ctx.signIn("gh@example.test");
+  assert.equal((await ctx.authorize(browser, client)).page, "/quiz");
+  await ctx.takeQuiz(browser, 3);
+  assert.equal(ctx.quizRow("u-gh")!.registration_method, "github");
+  assert.ok((await ctx.authorize(browser, client)).code);
+});
+
+test("on: other OIDC clients are unaffected for users who never took the quiz", async () => {
+  const ctx = setup();
+  const topic = await ctx.createClient("topic-research");
+  const other = await ctx.createClient("other-app");
+  ctx.env.QUIZ_CLIENTS = topic.client_id;
+  const { browser, user } = await ctx.signIn("someone@example.test");
+  const started = await ctx.authorize(browser, other);
+  assert.ok(started.code, `no quiz for other clients, got ${started.location}`);
+  const { userinfo } = await ctx.exchange(other, started.code!, started.verifier);
+  assert.deepEqual(Object.keys(userinfo).sort(), ["email", "email_verified", "name", "sub"]);
+  assert.equal(ctx.quizRow(user.id), undefined);
+});
+
+test("on with an empty QUIZ_CLIENTS: no client is gated", async () => {
+  const ctx = setup({ clients: "" });
+  const client = await ctx.createClient("topic-research");
+  const { browser } = await ctx.signIn("free@example.test");
+  assert.ok((await ctx.authorize(browser, client)).code);
+});
+
+test("on: CoLiving, canteen links and the legacy passcode API are unaffected", async () => {
+  const { Browser, signIn, codeFor } = setup({ clients: "topic-research" });
+  const linked = await new Browser().request("/v1/identity/links", { email: "resident@example.test", app: "coliving", external_id: "r-1" }, { "X-Service-Key": "link-test-key" });
+  assert.equal(linked.status, 200);
+  const { browser } = await signIn("resident@example.test");
+  const authorized = await browser.request("/v1/connect/authorize", { client_id: "coliving", redirect_uri: "https://4seas.xyz/coliving/auth/callback", state: "st" });
+  assert.equal(authorized.status, 200, authorized.text);
+  const exchanged = await new Browser().request("/v1/connect/token", {
+    client_id: "coliving", client_secret: "coliving-test-secret", code: authorized.json.code, redirect_uri: "https://4seas.xyz/coliving/auth/callback",
+  });
+  assert.equal(exchanged.status, 200);
+  const api = new Browser();
+  assert.equal((await api.request("/v1/auth/passcode/request", { email: "brand-new@example.test" })).status, 202, "sign-up stays open");
+  assert.equal((await api.request("/v1/auth/passcode/verify", { email: "brand-new@example.test", code: codeFor("brand-new@example.test") })).status, 200);
+});
+
+test("on: quiz endpoints need a session, refuse bots, and report an empty bank", async () => {
+  const ctx = setup({ clients: "topic-research" });
+  assert.equal((await new ctx.Browser().request("/api/auth/quiz/start", {})).status, 401);
+  const { browser } = await ctx.signIn("x@example.test");
+  const bot = new ctx.Browser("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)");
+  for (const [k, v] of browser.jar) bot.jar.set(k, v);
+  assert.equal((await bot.request("/api/auth/quiz/start", {})).status, 403);
+  ctx.d1.sqlite.exec("UPDATE quiz_question SET active = 0");
+  clearBankCache();
+  const empty = await browser.request("/api/auth/quiz/start", {});
+  assert.equal(empty.status, 503);
+  assert.equal(empty.json.code, "QUIZ_UNAVAILABLE");
+});
+
+test("on: an attempt is scored once and already-passed users skip the quiz", async () => {
+  const ctx = setup({ clients: "topic-research" });
+  const { browser } = await ctx.signIn("once@example.test");
+  const started = await browser.request("/api/auth/quiz/start", {});
+  const body = { attemptId: started.json.attemptId, answers: [0, 0, 0] };
+  await browser.request("/api/auth/quiz/submit", body);
+  const replay = await browser.request("/api/auth/quiz/submit", body);
+  assert.equal(replay.status, 410);
+  const other = await ctx.signIn("passer@example.test");
+  await ctx.takeQuiz(other.browser, 3);
+  assert.deepEqual((await other.browser.request("/api/auth/quiz/start", {})).json, { status: "passed" });
+  const status = await other.browser.request("/api/auth/quiz/status");
+  assert.equal(status.json.passed, true);
+});
+
+test("on: the quiz page needs a signed query and a session, in every language", async () => {
+  const ctx = setup();
+  const client = await ctx.createClient("topic-research");
+  ctx.env.QUIZ_CLIENTS = client.client_id;
+  const { browser } = await ctx.signIn("pages@example.test");
+  const { query } = await ctx.authorize(browser, client);
+  assert.equal((await browser.request("/quiz?client_id=x")).status, 400, "unsigned query");
+  assert.equal((await new ctx.Browser().request(`/quiz?${query}`)).status, 401, "no session");
+  for (const language of ["en", "zh", "th"]) {
+    const page = await browser.request(`/passport/${language}/quiz?${query}`);
+    assert.equal(page.status, 200);
+    assert.match(page.text, /id="quiz-form"/);
+  }
+});
+
+test("on: signing in on Passport's login page during an OIDC request goes to the quiz only for quiz clients", async () => {
+  const ctx = setup();
+  const topic = await ctx.createClient("topic-research");
+  const other = await ctx.createClient("other-app");
+  ctx.env.QUIZ_CLIENTS = topic.client_id;
+  for (const [client, gated] of [[topic, true], [other, false]] as const) {
+    const browser = new ctx.Browser();
+    const email = `login-${gated}@example.test`;
+    const start = await ctx.authorize(browser, client);
+    assert.equal(start.page, "/sign-in", "not signed in yet");
+    await browser.request("/api/auth/email-otp/send-verification-otp", { email, type: "sign-in" });
+    const signedIn = await browser.request("/api/auth/sign-in/email-otp", { email, otp: ctx.codeFor(email), oauth_query: start.query });
+    assert.equal(signedIn.status, 200, signedIn.text);
+    assert.equal(signedIn.json.redirect, true);
+    const next = ctx.redirectResult(signedIn.json.url, client);
+    if (gated) assert.equal(next.page, "/quiz");
+    else assert.ok(next.code, `other client gets a code, got ${signedIn.json.url}`);
+  }
 });
