@@ -40,7 +40,7 @@ test("migration 0002 only adds new tables and leaves Better Auth tables untouche
   }
   const added = (full.sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[])
     .map((r) => r.name).filter((name) => !columns(main, name).length);
-  assert.deepEqual(added.sort(), ["quiz_attempt", "quiz_cooldown", "quiz_counter", "quiz_pass", "quiz_question", "quiz_registration"]);
+  assert.deepEqual(added.sort(), ["quiz_attempt", "quiz_cooldown", "quiz_counter", "quiz_pass", "quiz_preapproved", "quiz_question", "quiz_registration"]);
 });
 
 test("seeding upserts, deactivates removed questions and escapes quotes", async () => {

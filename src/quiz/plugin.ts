@@ -30,6 +30,24 @@ export async function quizRecord(db: D1Database, userId: string): Promise<QuizRe
   return row && { registrationMethod: row.registration_method, quizPassedAt: row.quiz_passed_at, score: row.score, total: row.total };
 }
 
+/**
+ * The user's pass, or one granted by an imported allowlist (quiz_preapproved, e.g. members
+ * an app already had). A preapproved user gets a quiz_registration row with score 0 of 0
+ * the first time it is checked. Passport only holds verified emails, so the email match is safe.
+ */
+export async function ensurePass(db: D1Database, user: { id: string; email?: string | null }): Promise<QuizRecord | null> {
+  const record = await quizRecord(db, user.id);
+  if (record || !user.email) return record;
+  const preapproved = await db.prepare("SELECT 1 AS ok FROM quiz_preapproved WHERE email = ?1")
+    .bind(user.email.trim().toLowerCase()).first<number>("ok");
+  if (!preapproved) return null;
+  await db.prepare(`
+    INSERT INTO quiz_registration (user_id, registration_method, quiz_passed_at, score, total)
+    VALUES (?1, ?2, ?3, 0, 0) ON CONFLICT (user_id) DO NOTHING
+  `).bind(user.id, await registrationMethod(db, user.id), Date.now()).run();
+  return quizRecord(db, user.id);
+}
+
 /** How the account was created: its first linked provider, otherwise email. */
 async function registrationMethod(db: D1Database, userId: string): Promise<string> {
   const provider = await db.prepare(
@@ -79,12 +97,12 @@ export function quizPostLogin(options: { db: D1Database; clients: Set<string>; p
   return {
     page: options.page,
     consentReferenceId: () => undefined,
-    async shouldRedirect({ user }: { user: { id: string } }) {
+    async shouldRedirect({ user }: { user: { id: string; email?: string | null } }) {
       const clientId = await currentClientId();
       // If a quiz client is configured but the client cannot be identified, fail closed.
-      if (clientId === null) return options.clients.size > 0 && !(await quizRecord(options.db, user.id));
+      if (clientId === null) return options.clients.size > 0 && !(await ensurePass(options.db, user));
       if (!options.clients.has(clientId)) return false;
-      return !(await quizRecord(options.db, user.id));
+      return !(await ensurePass(options.db, user));
     },
   };
 }
@@ -101,13 +119,13 @@ export function quizRegistration(options: { gate: QuizGate; db: D1Database }) {
     rateLimit: [{ pathMatcher: (path: string) => path.startsWith("/quiz/"), window: 60, max: 10 }],
     endpoints: {
       quizStatus: createAuthEndpoint("/quiz/status", { method: "GET", use: [sessionMiddleware] }, async (ctx) => {
-        const record = await quizRecord(db, ctx.context.session.user.id);
+        const record = await ensurePass(db, ctx.context.session.user);
         return ctx.json({ passed: Boolean(record), ...(record ?? {}) });
       }),
       quizStart: createAuthEndpoint("/quiz/start", { method: "POST", use: [sessionMiddleware] }, async (ctx) => {
         notBot(ctx);
         const { user } = ctx.context.session;
-        if (await quizRecord(db, user.id)) return ctx.json({ status: "passed" });
+        if (await ensurePass(db, user)) return ctx.json({ status: "passed" });
         const ip = header(ctx, "cf-connecting-ip") ?? header(ctx, "x-forwarded-for")?.split(",")[0].trim() ?? null;
         const result = await gate.start({ email: user.email, ip, language: language(ctx) });
         if (!result.ok) {

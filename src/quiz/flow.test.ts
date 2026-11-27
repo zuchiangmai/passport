@@ -334,6 +334,19 @@ test("on: other OIDC clients are unaffected for users who never took the quiz", 
   assert.equal(ctx.quizRow(user.id), undefined);
 });
 
+test("on: imported members (quiz_preapproved) reach a quiz client without the quiz", async () => {
+  const ctx = setup();
+  const topic = await ctx.createClient("topic-research");
+  ctx.env.QUIZ_CLIENTS = topic.client_id;
+  ctx.d1.sqlite.prepare("INSERT INTO quiz_preapproved (email, source, created_at) VALUES (?, 'topic-research', ?)").run("member@example.test", Date.now());
+  const { browser, user } = await ctx.signIn("member@example.test");
+  const started = await ctx.authorize(browser, topic);
+  assert.ok(started.code, `preapproved member gets a code, got ${started.location}`);
+  assert.equal(ctx.quizRow(user.id)?.total, 0, "recorded as preapproved (0 of 0)");
+  const { browser: stranger } = await ctx.signIn("stranger@example.test");
+  assert.equal((await ctx.authorize(stranger, topic)).page, "/quiz", "others still take the quiz");
+});
+
 test("on with an empty QUIZ_CLIENTS: no client is gated", async () => {
   const ctx = setup({ clients: "" });
   const client = await ctx.createClient("topic-research");

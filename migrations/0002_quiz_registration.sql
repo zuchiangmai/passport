@@ -14,6 +14,15 @@ CREATE TABLE quiz_registration (
   total INTEGER NOT NULL
 );
 
+-- Emails that count as passed without taking the quiz, e.g. an app's existing
+-- members imported when it moves to Passport. Lower-case. Checked only when a
+-- user without a quiz_registration row reaches a quiz client.
+CREATE TABLE quiz_preapproved (
+  email TEXT PRIMARY KEY NOT NULL,
+  source TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 -- The bank lives here, seeded by scripts/seed-quiz-bank.mjs from a file outside git.
 -- body is the full question JSON, answer included. It never leaves the Worker unscored.
 CREATE TABLE quiz_question (

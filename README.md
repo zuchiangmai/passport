@@ -49,7 +49,8 @@ The quiz logic is the standalone module in `packages/quiz-gate/`. `src/quiz/` ho
 
 1. Deploying this code with the switch off needs nothing: no migration, no secrets, no seed.
 2. To enable it: apply `migrations/0002_quiz_registration.sql` to the D1 database (it only creates new `quiz_*` tables), seed the bank, then set `QUIZ_REGISTRATION=on` and `QUIZ_CLIENTS=<client id>`.
-3. Register the app as an OAuth client (with `skipConsent` for first-party apps) and point it at Passport's OIDC discovery document.
+3. Optional: mark the app's existing members as passed with `node scripts/import-quiz-preapproved.mjs members.txt --source <app> --remote` (emails file kept outside git). They go straight through on their first visit.
+4. Register the app as an OAuth client (with `skipConsent` for first-party apps) and point it at Passport's OIDC discovery document.
 
 The bank is never committed. Put it in `quiz/bank.local.json` or `quiz/bank.local.js` (git ignores everything in `quiz/` except the example) and run `node scripts/seed-quiz-bank.mjs quiz/bank.local.js`, adding `--remote` for production D1. See `quiz/README.md`.
 
