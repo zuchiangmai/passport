@@ -23,6 +23,9 @@
     "ENVIRONMENT": "development",
     "EMAIL_BACKEND": "resend",
     "BETTER_AUTH_URL": "https://4seas.xyz/passport",
-    "MAIL_FROM": "4Seas Passport <no-reply@idoris.ai>"
+    "MAIL_FROM": "4Seas Passport <no-reply@idoris.ai>",
+    "QUIZ_REGISTRATION": "on",
+    "QUIZ_CLIENTS": "topic-research",
+    "QUIZ_LEARN_BASE_URL": "https://topic-research.pages.dev/"
   }
 }
