@@ -7,6 +7,10 @@ import { checkResend, type OtpRow } from "./email/otp-policy.ts";
 import { sendResendEmail } from "./email/resend.ts";
 import { OTP_TTL_MINUTES, signInCodeEmail } from "./email/sign-in-code.ts";
 import { passportLanguage, preferredLanguage } from "./locale.ts";
+import { createQuizGate, type QuizGate } from "../packages/quiz-gate/src/index.ts";
+import { loadBank } from "./quiz/bank.ts";
+import { D1QuizStore } from "./quiz/d1-store.ts";
+import { quizClients, quizMode, quizPostLogin, quizRegistration } from "./quiz/plugin.ts";
 
 export const AUTH_PATH = "/api/auth";
 export const SEND_OTP = "/email-otp/send-verification-otp";
@@ -50,6 +54,33 @@ export interface Env {
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
   LINK_SERVICE_KEY?: string;
+  /** Master switch, off by default. See src/quiz/plugin.ts. */
+  QUIZ_REGISTRATION?: string;
+  /** OAuth client IDs that require a passed quiz, comma separated. */
+  QUIZ_CLIENTS?: string;
+  QUIZ_QUESTIONS?: string;
+  QUIZ_PASS_SCORE?: string;
+  /** Where the bank's relative "learn" links point, e.g. https://topic-research.pages.dev/ */
+  QUIZ_LEARN_BASE_URL?: string;
+  /** Local development only: a loopback URL that captures mail instead of Resend. */
+  RESEND_API_URL?: string;
+}
+
+function positiveInt(value: string | undefined): number | undefined {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+
+export function createGate(env: Env): QuizGate {
+  const questions = positiveInt(env.QUIZ_QUESTIONS);
+  const passScore = positiveInt(env.QUIZ_PASS_SCORE);
+  return createQuizGate({
+    // A separate key per purpose, derived from the one Better Auth secret.
+    secret: `quiz-gate:v1:${env.BETTER_AUTH_SECRET}`,
+    bank: () => loadBank(env.DB),
+    store: new D1QuizStore(env.DB),
+    policy: { ...(questions ? { questions } : {}), ...(passScore ? { passScore } : {}) },
+  });
 }
 
 export function normalizeEmail(value: unknown): string | null {
@@ -103,6 +134,8 @@ export function createAuth(env: Env, ctx: ExecutionContext) {
   const url = new URL(env.BETTER_AUTH_URL);
   const routes = authRouteBase(env.BETTER_AUTH_URL);
   const issuer = env.BETTER_AUTH_URL.replace(/\/+$/, "");
+  // With the switch off nothing quiz-related is configured, so behavior and schema match main.
+  const quiz = quizMode(env.QUIZ_REGISTRATION) === "on";
   return betterAuth({
     database: env.DB,
     secret: env.BETTER_AUTH_SECRET,
@@ -135,7 +168,11 @@ export function createAuth(env: Env, ctx: ExecutionContext) {
         consentPage: `${issuer}/consent`,
         allowDynamicClientRegistration: false,
         clientPrivileges: () => false,
+        ...(quiz ? {
+          postLogin: quizPostLogin({ db: env.DB, clients: quizClients(env.QUIZ_CLIENTS), page: `${issuer}/quiz` }),
+        } : {}),
       }),
+      ...(quiz ? [quizRegistration({ gate: createGate(env), db: env.DB })] : []),
       emailOTP({
         otpLength: 6,
         expiresIn: OTP_TTL_MINUTES * 60,
@@ -156,6 +193,7 @@ export function createAuth(env: Env, ctx: ExecutionContext) {
               to: email,
               ...signInCodeEmail(language, otp),
               tag: "passport_otp",
+              endpoint: env.RESEND_API_URL,
             });
             if (!result.ok) console.error("passport mail failed", result.error);
           })());

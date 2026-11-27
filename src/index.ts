@@ -6,7 +6,8 @@ import {
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { AUTH_PATH, authHandlerPath, authRouteBase, createAuth, normalizeEmail, SEND_OTP, SIGN_IN_OTP, type Env } from "./auth.ts";
 import { passportLanguage, preferredLanguage } from "./locale.ts";
-import { consentPage, signInPage } from "./pages.ts";
+import { consentPage, quizPage, signInPage } from "./pages.ts";
+import { quizMode } from "./quiz/plugin.ts";
 import { checkRedirect, client_secret_ok, PolicyError } from "./policy/clients.ts";
 import { authorizeGate, ensureLink, hasColiving, snapshot, type AppLink } from "./policy/links.ts";
 import { provisionColivingMember } from "./policy/provision.ts";
@@ -265,9 +266,10 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
     if (path === "/.well-known/openid-configuration" || path === AUTH_PATH + "/.well-known/openid-configuration") {
       return oauthProviderOpenIdConfigMetadata(createAuth(env, ctx))(request);
     }
-    const pageRoute = /^\/(?:(en|zh|th)\/)?(sign-in|login|consent)\/?$/.exec(path);
+    const pageRoute = /^\/(?:(en|zh|th)\/)?(sign-in|login|consent|quiz)\/?$/.exec(path);
     if (pageRoute) {
       const [, locale, route] = pageRoute;
+      if (route === "quiz" && quizMode(env.QUIZ_REGISTRATION) !== "on") return error(404, "not_found");
       const location = {
         language: passportLanguage(locale) ?? preferredLanguage(request.headers.get("accept-language")),
         prefix: incoming.pathname.startsWith("/passport/") ? "/passport" : "",
@@ -277,11 +279,11 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
       const auth = createAuth(env, ctx);
       const query = url.searchParams.toString();
       const signed = url.searchParams.has("sig");
-      if ((signed || route === "consent") &&
+      if ((signed || route === "consent" || route === "quiz") &&
           !(await verifyOAuthQueryParams(query, (await auth.$context).secret))) {
         return error(400, "invalid_oauth_query");
       }
-      if (route !== "consent") {
+      if (route !== "consent" && route !== "quiz") {
         return signInPage(location, signed ? query : "", {
           clientId: url.searchParams.get("client_id") ?? "",
           redirectUri: url.searchParams.get("redirect_uri") ?? "",
@@ -290,6 +292,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext) {
       }
       const session = await auth.api.getSession({ headers: request.headers });
       if (!session) return error(401, "unauthorized");
+      if (route === "quiz") return quizPage(location, query, env.QUIZ_LEARN_BASE_URL);
       return consentPage(location, query, url.searchParams.get("client_id") ?? "", url.searchParams.get("scope") ?? "");
     }
   }

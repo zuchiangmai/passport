@@ -23,4 +23,8 @@ curl -i "$BASE/v1/auth/passcode/verify" -H 'Content-Type: application/json' -d '
 # Both unauthorized requests return 401 without requiring any configured service secrets.
 curl -i "$BASE/v1/identity/links" -H 'Content-Type: application/json' -d '{}'
 curl -i "$BASE/v1/connect/token" -H 'Content-Type: application/json' -d '{}'
+
+# The quiz page and endpoints do not exist unless QUIZ_REGISTRATION=on (404).
+# With it on they need a session, so an anonymous request returns 401.
+curl -i "$BASE/passport/api/auth/quiz/status"
 `);

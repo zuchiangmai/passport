@@ -4,11 +4,14 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test:local": "node scripts/test-local.mjs"
+    "test": "node --test src/*.test.ts src/*/*.test.ts packages/*/src/*.test.ts",
+    "test:local": "node scripts/test-local.mjs",
+    "quiz:seed": "node scripts/seed-quiz-bank.mjs"
   },
   "packageManager": "pnpm@10.34.5",
   "dependencies": {
     "@4seas/site-chrome": "https://codeload.github.com/4seas-community/homepage/tar.gz/8f5d8395587be399a21125cca9801b3e610a2042",
+    "@better-auth/core": "1.7.28",
     "@better-auth/oauth-provider": "1.7.28",
     "@better-auth/passkey": "1.7.28",
     "better-auth": "1.7.28"

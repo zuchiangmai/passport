@@ -11,7 +11,21 @@ type SendResendEmailArgs = {
   html?: string;
   tag?: string;
   idempotencyKey?: string;
+  /** Override for local capture. Only http(s)://127.0.0.1 or localhost is honored. */
+  endpoint?: string;
 };
+
+export function resendEndpoint(override?: string): string {
+  if (!override?.trim()) return ENDPOINT;
+  try {
+    const url = new URL(override);
+    if ((url.protocol === "http:" || url.protocol === "https:") &&
+        (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]")) {
+      return url.href;
+    }
+  } catch {}
+  return ENDPOINT;
+}
 
 type SendResendEmailResult =
   | { ok: true; providerId?: string }
@@ -30,10 +44,11 @@ export async function sendResendEmail({
   html,
   tag,
   idempotencyKey,
+  endpoint,
 }: SendResendEmailArgs): Promise<SendResendEmailResult> {
   let response: Response;
   try {
-    response = await fetch(ENDPOINT, {
+    response = await fetch(resendEndpoint(endpoint), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
