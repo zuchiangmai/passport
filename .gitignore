@@ -159,3 +159,8 @@ venv/
 !.dev.vars.example
 .wrangler/
 /public/passport/site-chrome/
+
+# Quiz bank: only quiz/bank.example.json is public. The real bank stays local and goes to D1.
+/quiz/*
+!/quiz/bank.example.json
+!/quiz/README.md

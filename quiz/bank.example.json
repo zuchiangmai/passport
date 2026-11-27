@@ -1,0 +1,84 @@
+[
+  {
+    "id": "ex01",
+    "topic": "Ethereum",
+    "q": "以太坊的原生代币叫什么？",
+    "options": ["Ether (ETH)", "Bitcoin (BTC)", "Gwei Coin", "Solidity"],
+    "answer": 0,
+    "explain": "ETH 是以太坊的原生代币，用来支付 gas。gwei 是 ETH 的计量单位，Solidity 是合约语言。",
+    "source": { "url": "https://ethereum.org/en/eth/", "date": "2026-11-27" },
+    "i18n": {
+      "en": {
+        "q": "What is Ethereum's native token called?",
+        "options": ["Ether (ETH)", "Bitcoin (BTC)", "Gwei Coin", "Solidity"],
+        "explain": "ETH is Ethereum's native token and pays for gas. Gwei is a unit of ETH and Solidity is a contract language."
+      },
+      "th": {
+        "q": "โทเคนดั้งเดิมของ Ethereum ชื่ออะไร",
+        "options": ["Ether (ETH)", "Bitcoin (BTC)", "Gwei Coin", "Solidity"],
+        "explain": "ETH คือโทเคนดั้งเดิมของ Ethereum ใช้จ่ายค่า gas ส่วน gwei เป็นหน่วยของ ETH และ Solidity เป็นภาษาสัญญา"
+      }
+    }
+  },
+  {
+    "id": "ex02",
+    "topic": "Ethereum",
+    "q": "以太坊上执行交易需要支付的费用叫什么？",
+    "options": ["Gas", "Rent", "Stamp", "Toll"],
+    "answer": 0,
+    "explain": "交易与合约执行按 gas 计费。",
+    "i18n": {
+      "en": { "q": "What is the fee for executing a transaction on Ethereum called?", "options": ["Gas", "Rent", "Stamp", "Toll"], "explain": "Transactions and contract execution are priced in gas." },
+      "th": { "q": "ค่าธรรมเนียมในการทำธุรกรรมบน Ethereum เรียกว่าอะไร", "options": ["Gas", "Rent", "Stamp", "Toll"], "explain": "ธุรกรรมและการรันสัญญาคิดค่าเป็น gas" }
+    }
+  },
+  {
+    "id": "ex03",
+    "topic": "Web",
+    "q": "HTTPS 里的 S 代表什么？",
+    "options": ["Secure", "Static", "Simple", "Server"],
+    "answer": 0,
+    "explain": "HTTPS 是通过 TLS 加密的 HTTP，S 代表 Secure。",
+    "i18n": {
+      "en": { "q": "What does the S in HTTPS stand for?", "options": ["Secure", "Static", "Simple", "Server"], "explain": "HTTPS is HTTP over TLS. The S stands for Secure." },
+      "th": { "q": "ตัว S ใน HTTPS ย่อมาจากอะไร", "options": ["Secure", "Static", "Simple", "Server"], "explain": "HTTPS คือ HTTP ผ่าน TLS ตัว S ย่อมาจาก Secure" }
+    }
+  },
+  {
+    "id": "ex04",
+    "topic": "Web",
+    "q": "哪个 HTTP 状态码表示“未找到”？",
+    "options": ["404", "200", "301", "500"],
+    "answer": 0,
+    "explain": "404 Not Found。",
+    "i18n": {
+      "en": { "q": "Which HTTP status code means \"Not Found\"?", "options": ["404", "200", "301", "500"], "explain": "404 Not Found." },
+      "th": { "q": "รหัสสถานะ HTTP ใดหมายถึง \"ไม่พบ\"", "options": ["404", "200", "301", "500"], "explain": "404 Not Found" }
+    }
+  },
+  {
+    "id": "ex05",
+    "topic": "Account abstraction",
+    "q": "ERC-4337 引入的、代替普通交易提交给打包者的对象叫什么？",
+    "options": ["UserOperation", "Blob", "Receipt", "Uncle"],
+    "answer": 0,
+    "explain": "ERC-4337 让智能账户通过 UserOperation 发起操作，由 bundler 打包上链。",
+    "source": { "url": "https://eips.ethereum.org/EIPS/eip-4337", "date": "2026-11-27" },
+    "i18n": {
+      "en": { "q": "In ERC-4337, what object do users send to bundlers instead of a normal transaction?", "options": ["UserOperation", "Blob", "Receipt", "Uncle"], "explain": "ERC-4337 smart accounts submit UserOperations, which bundlers put on chain." },
+      "th": { "q": "ใน ERC-4337 ผู้ใช้ส่งออบเจ็กต์ใดให้ bundler แทนธุรกรรมปกติ", "options": ["UserOperation", "Blob", "Receipt", "Uncle"], "explain": "บัญชีอัจฉริยะใน ERC-4337 ส่ง UserOperation ให้ bundler นำขึ้นเชน" }
+    }
+  },
+  {
+    "id": "ex06",
+    "topic": "Account abstraction",
+    "q": "在 ERC-4337 中，替用户支付 gas 的合约叫什么？",
+    "options": ["Paymaster", "Validator", "Sequencer", "Oracle"],
+    "answer": 0,
+    "explain": "Paymaster 可以替用户支付 gas。",
+    "i18n": {
+      "en": { "q": "In ERC-4337, what is the contract that pays gas for users called?", "options": ["Paymaster", "Validator", "Sequencer", "Oracle"], "explain": "A Paymaster can sponsor gas for users." },
+      "th": { "q": "ใน ERC-4337 สัญญาที่จ่ายค่า gas แทนผู้ใช้เรียกว่าอะไร", "options": ["Paymaster", "Validator", "Sequencer", "Oracle"], "explain": "Paymaster สามารถจ่ายค่า gas แทนผู้ใช้ได้" }
+    }
+  }
+]

@@ -1,0 +1,14 @@
+{
+  "name": "@4seas/quiz-gate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Quiz-gated registration: question selection, server-side scoring, attempt and rate limits, and email-bound single-use pass tokens. No framework or runtime dependencies beyond Web Crypto.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --test src/*.test.ts"
+  },
+  "license": "Apache-2.0"
+}

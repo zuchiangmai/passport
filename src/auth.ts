@@ -7,6 +7,10 @@ import { checkResend, type OtpRow } from "./email/otp-policy.ts";
 import { sendResendEmail } from "./email/resend.ts";
 import { OTP_TTL_MINUTES, signInCodeEmail } from "./email/sign-in-code.ts";
 import { passportLanguage, preferredLanguage } from "./locale.ts";
+import { createQuizGate, type QuizGate } from "../packages/quiz-gate/src/index.ts";
+import { loadBank } from "./quiz/bank.ts";
+import { D1QuizStore } from "./quiz/d1-store.ts";
+import { guardSignInCode, quizMode, quizRegistration } from "./quiz/plugin.ts";
 
 export const AUTH_PATH = "/api/auth";
 export const SEND_OTP = "/email-otp/send-verification-otp";
@@ -50,6 +54,31 @@ export interface Env {
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
   LINK_SERVICE_KEY?: string;
+  /** off (default), on, or strict. See src/quiz/plugin.ts. */
+  QUIZ_REGISTRATION?: string;
+  QUIZ_QUESTIONS?: string;
+  QUIZ_PASS_SCORE?: string;
+  /** Where the bank's relative "learn" links point, e.g. https://topic-research.pages.dev/ */
+  QUIZ_LEARN_BASE_URL?: string;
+  /** Local development only: a loopback URL that captures mail instead of Resend. */
+  RESEND_API_URL?: string;
+}
+
+function positiveInt(value: string | undefined): number | undefined {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+
+export function createGate(env: Env): QuizGate {
+  const questions = positiveInt(env.QUIZ_QUESTIONS);
+  const passScore = positiveInt(env.QUIZ_PASS_SCORE);
+  return createQuizGate({
+    // A separate key per purpose, derived from the one Better Auth secret.
+    secret: `quiz-gate:v1:${env.BETTER_AUTH_SECRET}`,
+    bank: () => loadBank(env.DB),
+    store: new D1QuizStore(env.DB),
+    policy: { ...(questions ? { questions } : {}), ...(passScore ? { passScore } : {}) },
+  });
 }
 
 export function normalizeEmail(value: unknown): string | null {
@@ -98,11 +127,22 @@ async function reserveOtpSend(db: D1Database, email: string) {
   throw new APIError("TOO_MANY_REQUESTS", { code: "COOLDOWN", message: "Wait before requesting another code" });
 }
 
+/** Lets a client such as a research site require a passed quiz. Times are Unix seconds. */
+export function registrationClaims(user: Record<string, unknown>) {
+  const passed = user.quizPassedAt ? new Date(user.quizPassedAt as string | Date).getTime() : NaN;
+  return {
+    registration_method: typeof user.registrationMethod === "string" ? user.registrationMethod : null,
+    quiz_passed_at: Number.isFinite(passed) ? Math.floor(passed / 1000) : null,
+  };
+}
+
 export function createAuth(env: Env, ctx: ExecutionContext) {
   if (!env.BETTER_AUTH_SECRET?.trim()) throw new Error("BETTER_AUTH_SECRET is required");
   const url = new URL(env.BETTER_AUTH_URL);
   const routes = authRouteBase(env.BETTER_AUTH_URL);
   const issuer = env.BETTER_AUTH_URL.replace(/\/+$/, "");
+  const mode = quizMode(env.QUIZ_REGISTRATION);
+  const gate = createGate(env);
   return betterAuth({
     database: env.DB,
     secret: env.BETTER_AUTH_SECRET,
@@ -124,6 +164,8 @@ export function createAuth(env: Env, ctx: ExecutionContext) {
         if (request.body?.type !== "sign-in") {
           throw new APIError("BAD_REQUEST", { code: "UNSUPPORTED_OTP_TYPE", message: "Use a sign-in code" });
         }
+        // Before the cooldown, so a quiz-required answer does not delay the code after a pass.
+        await guardSignInCode(request, gate, mode, email);
         await reserveOtpSend(env.DB, email);
         return { context: { body: { ...request.body, email } } };
       }),
@@ -135,7 +177,10 @@ export function createAuth(env: Env, ctx: ExecutionContext) {
         consentPage: `${issuer}/consent`,
         allowDynamicClientRegistration: false,
         clientPrivileges: () => false,
+        customUserInfoClaims: ({ user }) => registrationClaims(user),
+        customIdTokenClaims: ({ user }) => registrationClaims(user),
       }),
+      quizRegistration({ gate, mode, secureCookie: url.protocol === "https:" }),
       emailOTP({
         otpLength: 6,
         expiresIn: OTP_TTL_MINUTES * 60,
@@ -156,6 +201,7 @@ export function createAuth(env: Env, ctx: ExecutionContext) {
               to: email,
               ...signInCodeEmail(language, otp),
               tag: "passport_otp",
+              endpoint: env.RESEND_API_URL,
             });
             if (!result.ok) console.error("passport mail failed", result.error);
           })());
